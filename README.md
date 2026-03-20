@@ -15,7 +15,7 @@ Each configured group maps to one working directory and one persistent `tmux`-ho
 | Inbound port | Not required |
 | Verification token | Not required |
 | Multi-line user input | Sent to Codex as bracketed paste |
-| Output forwarded to chat | New assistant reply body |
+| Output forwarded to chat | Incremental assistant output from the Codex pane |
 | Output hidden from chat | Codex terminal chrome and input box |
 
 ## Safety
@@ -162,6 +162,9 @@ After startup, send messages in the configured group as if you were talking dire
 | Group queue | Messages are serialized per group |
 | Multiple groups | Run independently |
 | Restarts | Existing `tmux` sessions are reused |
+| Single instance | One running `imcodex` process per config file |
+| Working notice | Sends `[working]` when a request is dispatched |
+| Replies | Forwarded as new Codex output appears |
 
 ## Inspect the session
 
@@ -182,6 +185,10 @@ Check:
 4. `codex login` has already completed.
 5. `tmux` and `codex` are in `PATH`.
 6. The startup log shows the config file you expected.
+
+### Messages are duplicated
+
+Run only one `imcodex` process for the same config file. A second process with the same groups will forward the same Codex output again.
 
 ### The session disappeared after a restart
 

@@ -39,31 +39,20 @@ func NormalizeSnapshot(snapshot string) string {
 	return strings.Join(out, "\n")
 }
 
-func DiffText(prev string, curr string) string {
+func DiffText(prev string, curr string) (string, bool) {
 	if curr == prev {
-		return ""
+		return "", false
 	}
 	if prev == "" {
-		return curr
+		return curr, false
 	}
-	if curr == "" {
-		return ""
+	if strings.HasPrefix(curr, prev) {
+		return curr[len(prev):], false
 	}
-
-	prevLines := strings.Split(prev, "\n")
-	currLines := strings.Split(curr, "\n")
-
-	maxOverlap := min(len(prevLines), len(currLines))
-	for n := maxOverlap; n > 0; n-- {
-		if equalLines(prevLines[len(prevLines)-n:], currLines[:n]) {
-			return strings.Join(currLines[n:], "\n")
-		}
+	if overlap := suffixPrefixOverlap(prev, curr); overlap > 0 {
+		return curr[overlap:], false
 	}
-
-	if strings.HasSuffix(curr, prev) {
-		return ""
-	}
-	return curr
+	return curr, true
 }
 
 func SliceAfter(base string, curr string) string {
@@ -90,77 +79,22 @@ func SliceAfter(base string, curr string) string {
 	return curr
 }
 
-func OutputBody(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-
-	blocks := splitBlocks(strings.Split(text, "\n"))
-	start := trimLeadingPromptBlocks(blocks, 0)
-	if start >= len(blocks) {
-		return ""
-	}
-
-	end := trimTrailingPromptBlocks(blocks, len(blocks), start)
-	if end <= start {
-		return ""
-	}
-
-	kept := make([]string, 0, end-start)
-	afterPrompt := false
-	for _, block := range blocks[start:end] {
-		if isPromptBlock(block) {
-			afterPrompt = true
+func IsBusy(snapshot string) bool {
+	snapshot = stripANSI(snapshot)
+	lines := strings.Split(snapshot, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
 			continue
 		}
-		if isIndentedBlock(block) {
-			if afterPrompt || len(kept) == 0 {
-				continue
-			}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "esc to interrupt") {
+			return true
 		}
-		kept = append(kept, strings.Join(block, "\n"))
-		afterPrompt = false
-	}
-	return strings.TrimSpace(strings.Join(kept, "\n\n"))
-}
-
-func AppendOnlyDelta(prev string, curr string) (string, bool) {
-	if curr == prev {
-		return "", true
-	}
-	if prev == "" {
-		return curr, true
-	}
-	if curr == "" {
-		return "", true
-	}
-
-	prevLines := strings.Split(prev, "\n")
-	currLines := strings.Split(curr, "\n")
-
-	maxOverlap := min(len(prevLines), len(currLines))
-	for n := maxOverlap; n > 0; n-- {
-		if equalLines(prevLines[len(prevLines)-n:], currLines[:n]) {
-			return strings.Join(currLines[n:], "\n"), true
+		if isTrailingBusyChrome(line) {
+			continue
 		}
-	}
-
-	return "", false
-}
-
-func IsBusy(snapshot string) bool {
-	lines := recentNonEmptyLines(snapshot, 3)
-	if len(lines) == 0 {
 		return false
-	}
-
-	last := strings.ToLower(lines[len(lines)-1])
-	if strings.Contains(last, "esc to interrupt") {
-		return true
-	}
-	if len(lines) >= 2 && isPromptCursorLine(last) {
-		return strings.Contains(strings.ToLower(lines[len(lines)-2]), "esc to interrupt")
 	}
 	return false
 }
@@ -186,7 +120,8 @@ func shouldIgnoreLine(line string) bool {
 		strings.HasPrefix(line, "comes with higher risk of prompt injection."),
 		strings.HasPrefix(line, "1. Yes, continue"),
 		strings.HasPrefix(line, "2. No, quit"),
-		strings.HasPrefix(line, "Press enter to continue"):
+		strings.HasPrefix(line, "Press enter to continue"),
+		strings.HasPrefix(line, "›"):
 		return true
 	case strings.Contains(line, "chatgpt.com/codex"),
 		strings.Contains(line, "community.openai.com"),
@@ -198,102 +133,28 @@ func shouldIgnoreLine(line string) bool {
 	}
 }
 
-func recentNonEmptyLines(snapshot string, maxLines int) []string {
-	snapshot = stripANSI(snapshot)
-	lines := strings.Split(snapshot, "\n")
-
-	filtered := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			filtered = append(filtered, line)
-		}
-	}
-	if maxLines > 0 && len(filtered) > maxLines {
-		filtered = filtered[len(filtered)-maxLines:]
-	}
-	return filtered
-}
-
-func isPromptCursorLine(line string) bool {
+func isTrailingBusyChrome(line string) bool {
 	line = strings.TrimSpace(line)
-	return line == "›" || line == ">"
+	if line == "" {
+		return true
+	}
+	if line == "›" || line == ">" {
+		return true
+	}
+	if strings.HasPrefix(line, "›") {
+		return true
+	}
+	return shouldIgnoreLine(line)
 }
 
-func isPromptLine(line string) bool {
-	line = strings.TrimSpace(line)
-	return strings.HasPrefix(line, "›") || strings.HasPrefix(line, ">")
-}
-
-func isPromptBlock(lines []string) bool {
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		return isPromptLine(trimmed)
-	}
-	return false
-}
-
-func isIndentedBlock(lines []string) bool {
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		return line[0] == ' ' || line[0] == '\t'
-	}
-	return false
-}
-
-func trimLeadingPromptBlocks(blocks [][]string, start int) int {
-	skippedPrompt := false
-	for start < len(blocks) {
-		switch {
-		case isPromptBlock(blocks[start]):
-			start++
-			skippedPrompt = true
-		case skippedPrompt && isIndentedBlock(blocks[start]):
-			start++
-		default:
-			return start
+func suffixPrefixOverlap(prev string, curr string) int {
+	limit := min(len(prev), len(curr))
+	for size := limit; size > 0; size-- {
+		if prev[len(prev)-size:] == curr[:size] {
+			return size
 		}
 	}
-	return start
-}
-
-func trimTrailingPromptBlocks(blocks [][]string, end int, floor int) int {
-	for end > floor {
-		if !isPromptBlock(blocks[end-1]) {
-			return end
-		}
-		end--
-	}
-	return end
-}
-
-func splitBlocks(lines []string) [][]string {
-	var blocks [][]string
-	var current []string
-	flush := func() {
-		if len(current) == 0 {
-			return
-		}
-		block := make([]string, len(current))
-		copy(block, current)
-		blocks = append(blocks, block)
-		current = nil
-	}
-
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			flush()
-			continue
-		}
-		current = append(current, line)
-	}
-	flush()
-	return blocks
+	return 0
 }
 
 func equalLines(a []string, b []string) bool {

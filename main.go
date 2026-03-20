@@ -18,6 +18,12 @@ func main() {
 		log.Fatal(err)
 	}
 
+	releaseLock, err := acquireProcessLock(cfg.path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer releaseLock()
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 

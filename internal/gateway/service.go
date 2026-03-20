@@ -15,8 +15,6 @@ import (
 
 const (
 	maxMessageRunes      = 3000
-	streamFlushRunes     = 2400
-	quietFlushRunes      = 600
 	queueSize            = 64
 	recentMessageIDLimit = 256
 )
@@ -51,6 +49,7 @@ type Service struct {
 	logger    *slog.Logger
 	pollEvery time.Duration
 	startWait time.Duration
+	history   int
 
 	mu      sync.Mutex
 	runtime *groupRuntime
@@ -67,9 +66,7 @@ type groupRuntime struct {
 	sessionReady bool
 	lastText     string
 	baseText     string
-	lastBody     string
-	sentBody     string
-	busy         bool
+	lastBusy     bool
 	idleTicks    int
 	outputBuffer string
 }
@@ -87,8 +84,9 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		messenger: messenger,
 		console:   console,
 		logger:    logger,
-		pollEvery: 300 * time.Millisecond,
+		pollEvery: time.Second,
 		startWait: 4 * time.Second,
+		history:   2000,
 	}
 }
 
@@ -193,7 +191,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 				s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("[imcodex] Failed to start session: %v", err))
 				continue
 			}
-			if !rt.busy && len(rt.pending) > 0 {
+			if !rt.lastBusy && len(rt.pending) > 0 {
 				s.dispatchNext(rt)
 			}
 		case <-ticker.C:
@@ -205,7 +203,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 					s.logger.Warn("retry ensure session failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
 					continue
 				}
-				if !rt.busy && len(rt.pending) > 0 {
+				if !rt.lastBusy && len(rt.pending) > 0 {
 					s.dispatchNext(rt)
 				}
 				continue
@@ -230,16 +228,14 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		return err
 	}
 
-	snapshot, err := s.console.Capture(s.ctx, rt.session, 200)
+	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
 	if err != nil {
 		return err
 	}
 
 	rt.lastText = tmuxctl.NormalizeSnapshot(snapshot)
 	rt.baseText = ""
-	rt.lastBody = ""
-	rt.sentBody = ""
-	rt.busy = tmuxctl.IsBusy(snapshot)
+	rt.lastBusy = tmuxctl.IsBusy(snapshot)
 	rt.idleTicks = 0
 	rt.outputBuffer = ""
 	rt.sessionReady = true
@@ -262,70 +258,59 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("[imcodex] Failed to send to Codex: %v", err))
 		rt.pending = append([]string{text}, rt.pending...)
 		rt.sessionReady = false
-		rt.busy = false
 		rt.baseText = ""
-		rt.lastBody = ""
-		rt.sentBody = ""
+		rt.lastBusy = false
 		rt.idleTicks = 0
 		rt.lastText = ""
 		rt.outputBuffer = ""
 		return
 	}
 
-	rt.busy = true
 	rt.baseText = rt.lastText
-	rt.lastBody = ""
-	rt.sentBody = ""
+	rt.lastBusy = true
 	rt.idleTicks = 0
 	rt.outputBuffer = ""
 	s.sendBestEffort(rt.opts.GroupID, "[working] Codex is processing.")
 }
 
 func (s *Service) poll(rt *groupRuntime) {
-	snapshot, err := s.console.Capture(s.ctx, rt.session, 200)
+	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
 	if err != nil {
 		s.logger.Warn("capture tmux pane failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
 		rt.sessionReady = false
-		rt.busy = false
 		rt.baseText = ""
-		rt.lastBody = ""
-		rt.sentBody = ""
+		rt.lastBusy = false
 		rt.idleTicks = 0
 		rt.lastText = ""
 		rt.outputBuffer = ""
 		return
 	}
 
-	currText := tmuxctl.NormalizeSnapshot(snapshot)
-	currBody := tmuxctl.OutputBody(tmuxctl.SliceAfter(rt.baseText, currText))
-	delta, appendOnly := tmuxctl.AppendOnlyDelta(rt.lastBody, currBody)
+	currFullText := tmuxctl.NormalizeSnapshot(snapshot)
+	prevText := tmuxctl.SliceAfter(rt.baseText, rt.lastText)
+	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
 	busy := tmuxctl.IsBusy(snapshot)
+	delta, reset := tmuxctl.DiffText(prevText, currText)
 
-	if delta != "" {
+	if busy {
 		rt.idleTicks = 0
 	} else {
 		rt.idleTicks++
 	}
 
-	if !appendOnly {
-		rt.outputBuffer = tmuxctl.SliceAfter(rt.sentBody, currBody)
-	} else if delta != "" {
-		if rt.outputBuffer != "" && !strings.HasSuffix(rt.outputBuffer, "\n") && !strings.HasPrefix(delta, "\n") {
-			rt.outputBuffer += "\n"
-		}
+	if delta != "" {
 		rt.outputBuffer += delta
 	}
-
+	if reset {
+		rt.outputBuffer = ""
+	}
 	if shouldFlush(rt.outputBuffer, busy, rt.idleTicks) {
 		s.sendChunked(rt.opts.GroupID, strings.Trim(rt.outputBuffer, "\n"))
-		rt.sentBody = currBody
 		rt.outputBuffer = ""
-		rt.idleTicks = 0
 	}
 
-	rt.lastText = currText
-	rt.lastBody = currBody
-	rt.busy = busy
+	rt.lastText = currFullText
+	rt.lastBusy = busy
 
 	if !busy && len(rt.pending) > 0 {
 		s.dispatchNext(rt)
@@ -333,18 +318,16 @@ func (s *Service) poll(rt *groupRuntime) {
 }
 
 func shouldFlush(buffer string, busy bool, idleTicks int) bool {
-	buffer = strings.TrimSpace(buffer)
-	if buffer == "" {
+	if strings.TrimSpace(buffer) == "" {
 		return false
 	}
-	runes := utf8.RuneCountInString(buffer)
-	if !busy && idleTicks >= 1 {
+	if !busy && idleTicks >= 2 {
 		return true
 	}
-	if runes >= streamFlushRunes {
+	if strings.Contains(buffer, "\n") {
 		return true
 	}
-	return busy && idleTicks >= 2 && runes >= quietFlushRunes
+	return utf8.RuneCountInString(buffer) >= 80
 }
 
 func (s *Service) sendChunked(groupID string, text string) {

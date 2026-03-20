@@ -33,11 +33,12 @@ func (f *fakeMessenger) all() []string {
 }
 
 type fakeConsole struct {
-	mu           sync.Mutex
-	captures     []string
-	sendTexts    []string
-	ensureErrors []error
-	sendErrors   []error
+	mu            sync.Mutex
+	captures      []string
+	captureErrors []error
+	sendTexts     []string
+	ensureErrors  []error
+	sendErrors    []error
 }
 
 func (f *fakeConsole) EnsureSession(context.Context, tmuxctl.SessionSpec) (bool, error) {
@@ -74,6 +75,15 @@ func (f *fakeConsole) SendText(_ context.Context, _ string, text string) error {
 func (f *fakeConsole) Capture(context.Context, string, int) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.captureErrors) > 0 {
+		err := f.captureErrors[0]
+		if len(f.captureErrors) > 1 {
+			f.captureErrors = f.captureErrors[1:]
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 	if len(f.captures) == 0 {
 		return "", nil
 	}
@@ -102,34 +112,61 @@ func TestServiceBridgesMessageToConsole(t *testing.T) {
 		captures: []string{
 			"",
 			"• Working (1s • esc to interrupt)",
-			"› hello\n\n• Hello.\n\n  gpt-5.4 xhigh · 100% left · /srv/demo",
-			"› hello\n\n• Hello.\n\n  gpt-5.4 xhigh · 100% left · /srv/demo",
+			"• Hel",
+			"• Hello\n\n  gpt-5.4 xhigh · 100% left · /srv/demo",
+			"• Hello\n\n  gpt-5.4 xhigh · 100% left · /srv/demo",
 		},
 	}
 	messenger := &fakeMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
 	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
 	svc.startWait = 0
 
 	if err := svc.HandleMessage(context.Background(), IncomingMessage{
-		GroupID: "oc_1",
-		Text:    "hello",
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "Just answer hello",
 	}); err != nil {
 		t.Fatalf("HandleMessage() error = %v", err)
 	}
 
 	waitFor(t, 500*time.Millisecond, func() bool {
-		return strings.Contains(strings.Join(messenger.all(), "\n"), "Hello.")
+		joined := strings.Join(messenger.all(), "\n")
+		return strings.Contains(joined, "[working]") && strings.Contains(joined, "Hello")
 	})
 
-	joined := strings.Join(messenger.all(), "\n")
-	if strings.Contains(joined, "› hello") {
-		t.Fatalf("messages = %#v, want prompt echo hidden", messenger.all())
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if strings.Contains(joined, "›") {
+		t.Fatalf("messages = %#v, want prompt lines hidden", messenger.all())
 	}
 }
 
-func TestServiceOnlySendsNewContentAfterSnapshotScroll(t *testing.T) {
+func TestServiceRejectsUnknownGroup(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	messenger := &fakeMessenger{}
+	console := &fakeConsole{}
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_other",
+		Text:      "hello",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	if got := messenger.all(); len(got) != 0 {
+		t.Fatalf("messages = %#v, want ignored unknown-group message", got)
+	}
+}
+
+func TestServiceStreamsScrolledSnapshotWithoutRepeatingPrefix(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,7 +177,6 @@ func TestServiceOnlySendsNewContentAfterSnapshotScroll(t *testing.T) {
 			"",
 			"• Working (1s • esc to interrupt)",
 			"• Alpha\n• Beta",
-			"• Alpha\n• Beta",
 			"• Beta\n• Gamma",
 			"• Beta\n• Gamma",
 		},
@@ -149,18 +185,19 @@ func TestServiceOnlySendsNewContentAfterSnapshotScroll(t *testing.T) {
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
 	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
 	svc.startWait = 0
 
 	if err := svc.HandleMessage(context.Background(), IncomingMessage{
-		GroupID: "oc_1",
-		Text:    "summarize progress",
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "summarize progress",
 	}); err != nil {
 		t.Fatalf("HandleMessage() error = %v", err)
 	}
 
 	waitFor(t, 500*time.Millisecond, func() bool {
-		outputs := nonStatusMessages(messenger.all())
-		return len(outputs) >= 2
+		return len(nonStatusMessages(messenger.all())) >= 2
 	})
 
 	outputs := nonStatusMessages(messenger.all())
@@ -172,7 +209,7 @@ func TestServiceOnlySendsNewContentAfterSnapshotScroll(t *testing.T) {
 	}
 }
 
-func TestServiceSkipsPromptEchoAndPlaceholder(t *testing.T) {
+func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -180,194 +217,38 @@ func TestServiceSkipsPromptEchoAndPlaceholder(t *testing.T) {
 
 	console := &fakeConsole{
 		captures: []string{
-			"",
-			"• Working (1s • esc to interrupt)",
-			"› hi\n\n• Hi.\n\n› 在是？\n\n› Write tests for @filename",
-			"› hi\n\n• Hi.\n\n› 在是？\n\n• 在。说事。\n\n› Write tests for @filename",
-			"› hi\n\n• Hi.\n\n› 在是？\n\n• 在。说事。\n\n› Write tests for @filename",
+			"• old reply one\n\n• old reply two",
+			"• old reply one\n\n• old reply two\n\n• Working (1s • esc to interrupt)",
+			"• old reply one\n\n• old reply two\n\n• new reply start",
+			"• old reply one\n\n• old reply two\n\n• new reply start\n\n• new reply final",
+			"• old reply one\n\n• old reply two\n\n• new reply start\n\n• new reply final",
 		},
 	}
 	messenger := &fakeMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
 	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
 	svc.startWait = 0
 
 	if err := svc.HandleMessage(context.Background(), IncomingMessage{
-		GroupID: "oc_1",
-		Text:    "在是？",
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "new question",
 	}); err != nil {
 		t.Fatalf("HandleMessage() error = %v", err)
 	}
 
 	waitFor(t, 500*time.Millisecond, func() bool {
-		return strings.Contains(strings.Join(messenger.all(), "\n"), "在。说事。")
+		return len(nonStatusMessages(messenger.all())) >= 1
 	})
 
 	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
-	if strings.Contains(joined, "› hi") || strings.Contains(joined, "› 在是？") || strings.Contains(joined, "› Write tests for @filename") {
-		t.Fatalf("messages = %#v, want prompt area hidden", messenger.all())
+	if strings.Contains(joined, "old reply one") || strings.Contains(joined, "old reply two") {
+		t.Fatalf("messages = %#v, want previous history excluded", messenger.all())
 	}
-}
-
-func TestServicePollBatchesSmallBusyUpdatesUntilQuiet(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	console := &fakeConsole{
-		captures: []string{
-			"• Current directory: /srv/demo\n• Working (1s • esc to interrupt)",
-			"• Current directory: /srv/demo\n| name | type |\n• Working (1s • esc to interrupt)",
-			"• Current directory: /srv/demo\n| name | type |\n| --- | --- |\n| alpha | dir |\n| beta | dir |\n• Working (1s • esc to interrupt)",
-			"• Current directory: /srv/demo\n| name | type |\n| --- | --- |\n| alpha | dir |\n| beta | dir |",
-		},
-	}
-	messenger := &fakeMessenger{}
-
-	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
-	rt := &groupRuntime{
-		opts:         svc.opts,
-		session:      svc.opts.SessionName,
-		sessionReady: true,
-	}
-
-	svc.poll(rt)
-	svc.poll(rt)
-	svc.poll(rt)
-	if got := nonStatusMessages(messenger.all()); len(got) != 0 {
-		t.Fatalf("messages after busy deltas = %#v, want none yet", got)
-	}
-
-	svc.poll(rt)
-	got := nonStatusMessages(messenger.all())
-	if len(got) != 1 {
-		t.Fatalf("messages after quiet flush = %#v, want single batch", got)
-	}
-	want := "• Current directory: /srv/demo\n| name | type |\n| --- | --- |\n| alpha | dir |\n| beta | dir |"
-	if got[0] != want {
-		t.Fatalf("batched output = %q, want %q", got[0], want)
-	}
-}
-
-func TestServicePollStreamsLargeBusyOutput(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	large := "• " + strings.Repeat("x", streamFlushRunes+20)
-	console := &fakeConsole{
-		captures: []string{
-			large + "\n• Working (1s • esc to interrupt)",
-		},
-	}
-	messenger := &fakeMessenger{}
-
-	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
-	rt := &groupRuntime{
-		opts:         svc.opts,
-		session:      svc.opts.SessionName,
-		sessionReady: true,
-	}
-
-	svc.poll(rt)
-
-	got := nonStatusMessages(messenger.all())
-	if len(got) != 1 {
-		t.Fatalf("messages = %#v, want one streamed chunk while busy", got)
-	}
-	if got[0] != large {
-		t.Fatalf("streamed output = %q, want %q", got[0], large)
-	}
-	if !rt.busy {
-		t.Fatal("rt.busy = false, want true because codex is still working")
-	}
-}
-
-func TestServiceBridgesRealisticCodexSnapshotAsSingleBlock(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	console := &fakeConsole{
-		captures: []string{
-			"",
-			"• Working (1s • esc to interrupt)",
-			"› 哈哈，你能看到我在发什么吗？\n\n• 能看到。你发的是：“哈哈，你能看到我在发什么吗？”\n\n› 1. 今天星期几？\n  2. 假如你是小a，你叫什么名字？\n\n  4. 好了。\n\n• 你在问两个直接问题，我先用系统时间确认今天的具体日期和星期，再一起回答。\n\n• Working (2s • esc to interrupt)",
-			"› 哈哈，你能看到我在发什么吗？\n\n• 能看到。你发的是：“哈哈，你能看到我在发什么吗？”\n\n› 1. 今天星期几？\n  2. 假如你是小a，你叫什么名字？\n\n  4. 好了。\n\n• 你在问两个直接问题，我先用系统时间确认今天的具体日期和星期，再一起回答。\n\n• Ran TZ=Asia/Shanghai date '+%Y-%m-%d %A'\n  └ 2026-03-20 Friday\n\n────────────────────────────────────────────────────────────────────────────────\n\n• 1. 今天是星期五，日期是 2026 年 3 月 20 日。\n  2. 假如我是小a，那我就叫小a。",
-			"› 哈哈，你能看到我在发什么吗？\n\n• 能看到。你发的是：“哈哈，你能看到我在发什么吗？”\n\n› 1. 今天星期几？\n  2. 假如你是小a，你叫什么名字？\n\n  4. 好了。\n\n• 你在问两个直接问题，我先用系统时间确认今天的具体日期和星期，再一起回答。\n\n• Ran TZ=Asia/Shanghai date '+%Y-%m-%d %A'\n  └ 2026-03-20 Friday\n\n────────────────────────────────────────────────────────────────────────────────\n\n• 1. 今天是星期五，日期是 2026 年 3 月 20 日。\n  2. 假如我是小a，那我就叫小a。",
-		},
-	}
-	messenger := &fakeMessenger{}
-
-	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
-	svc.pollEvery = 5 * time.Millisecond
-	svc.startWait = 0
-
-	if err := svc.HandleMessage(context.Background(), IncomingMessage{GroupID: "oc_1", Text: "哈哈，你能看到我在发什么吗？\n\n1. 今天星期几？\n2. 假如你是小a，你叫什么名字？\n\n4. 好了。"}); err != nil {
-		t.Fatalf("HandleMessage() error = %v", err)
-	}
-
-	waitFor(t, 500*time.Millisecond, func() bool {
-		return len(nonStatusMessages(messenger.all())) >= 1
-	})
-
-	outputs := nonStatusMessages(messenger.all())
-	if len(outputs) != 1 {
-		t.Fatalf("outputs = %#v, want one block", outputs)
-	}
-	joined := outputs[0]
-	if strings.Contains(joined, "› 1. 今天星期几？") || strings.Contains(joined, "  4. 好了。") {
-		t.Fatalf("output leaked prompt block = %q", joined)
-	}
-	if !strings.Contains(joined, "────────────────") {
-		t.Fatalf("output missing divider = %q", joined)
-	}
-	if !strings.Contains(joined, "• 1. 今天是星期五，日期是 2026 年 3 月 20 日。") {
-		t.Fatalf("output missing final answer = %q", joined)
-	}
-}
-
-func TestServiceSkipsSessionHistoryBeforeCurrentRequest(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	console := &fakeConsole{
-		captures: []string{
-			"› Summarize recent commits\n\n› Explain this code",
-			"› Summarize recent commits\n\n› Explain this code\n\n• Working (1s • esc to interrupt)",
-			"› Summarize recent commits\n\n› Explain this code\n\n› hello\n\n• hi there",
-			"› Summarize recent commits\n\n› Explain this code\n\n› hello\n\n• hi there",
-		},
-	}
-	messenger := &fakeMessenger{}
-
-	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
-	svc.pollEvery = 5 * time.Millisecond
-	svc.startWait = 0
-
-	if err := svc.HandleMessage(context.Background(), IncomingMessage{GroupID: "oc_1", Text: "hello"}); err != nil {
-		t.Fatalf("HandleMessage() error = %v", err)
-	}
-
-	waitFor(t, 500*time.Millisecond, func() bool {
-		return len(nonStatusMessages(messenger.all())) >= 1
-	})
-
-	outputs := nonStatusMessages(messenger.all())
-	if len(outputs) != 1 {
-		t.Fatalf("outputs = %#v, want one reply block", outputs)
-	}
-	if strings.Contains(outputs[0], "Summarize recent commits") || strings.Contains(outputs[0], "Explain this code") {
-		t.Fatalf("outputs = %#v, want previous session history excluded", outputs)
-	}
-	if strings.Contains(outputs[0], "› hello") || !strings.Contains(outputs[0], "• hi there") {
-		t.Fatalf("outputs = %#v, want assistant reply only", outputs)
+	if !strings.Contains(joined, "new reply start") {
+		t.Fatalf("messages = %#v, want current reply forwarded", messenger.all())
 	}
 }
 
@@ -390,12 +271,13 @@ func TestServiceQueuesSecondMessageUntilBusyClears(t *testing.T) {
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
 	svc.pollEvery = 20 * time.Millisecond
+	svc.history = 2000
 	svc.startWait = 0
 
-	if err := svc.HandleMessage(context.Background(), IncomingMessage{GroupID: "oc_1", Text: "first"}); err != nil {
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_1", GroupID: "oc_1", Text: "first"}); err != nil {
 		t.Fatalf("HandleMessage(first) error = %v", err)
 	}
-	if err := svc.HandleMessage(context.Background(), IncomingMessage{GroupID: "oc_1", Text: "second"}); err != nil {
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_2", GroupID: "oc_1", Text: "second"}); err != nil {
 		t.Fatalf("HandleMessage(second) error = %v", err)
 	}
 
@@ -421,6 +303,7 @@ func TestServiceIgnoresDuplicateMessageIDs(t *testing.T) {
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
 	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
 	svc.startWait = 0
 
 	msg := IncomingMessage{MessageID: "om_1", GroupID: "oc_1", Text: "hello"}
@@ -454,14 +337,47 @@ func TestServiceRetriesAfterEnsureSessionFailure(t *testing.T) {
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
 	svc.pollEvery = 10 * time.Millisecond
+	svc.history = 2000
 	svc.startWait = 0
 
-	if err := svc.HandleMessage(context.Background(), IncomingMessage{GroupID: "oc_1", Text: "hello"}); err != nil {
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_1", GroupID: "oc_1", Text: "hello"}); err != nil {
 		t.Fatalf("HandleMessage() error = %v", err)
 	}
 
 	waitFor(t, 500*time.Millisecond, func() bool {
-		return strings.Contains(strings.Join(messenger.all(), "\n"), "tmux unavailable")
+		return len(console.allSendTexts()) >= 1
+	})
+
+	joined := strings.Join(messenger.all(), "\n")
+	if !strings.Contains(joined, "tmux unavailable") {
+		t.Fatalf("messages = %#v, want startup failure surfaced", messenger.all())
+	}
+}
+
+func TestServiceRequeuesMessageAfterSendFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures:   []string{"", ""},
+		sendErrors: []error{errors.New("send failed"), nil},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
+	svc.pollEvery = 10 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_1", GroupID: "oc_1", Text: "hello"}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := console.allSendTexts()
+		return len(got) >= 2 && got[0] == "hello" && got[1] == "hello"
 	})
 }
 
