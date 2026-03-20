@@ -14,13 +14,15 @@ import (
 )
 
 const (
-	maxMessageRunes = 3000
-	queueSize       = 64
+	maxMessageRunes      = 3000
+	queueSize            = 64
+	recentMessageIDLimit = 256
 )
 
 type IncomingMessage struct {
-	GroupID string
-	Text    string
+	MessageID string
+	GroupID   string
+	Text      string
 }
 
 type Options struct {
@@ -51,6 +53,9 @@ type Service struct {
 
 	mu      sync.Mutex
 	runtime *groupRuntime
+
+	recentMessageIDs []string
+	recentMessageSet map[string]struct{}
 }
 
 type groupRuntime struct {
@@ -85,20 +90,71 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 }
 
 func (s *Service) HandleMessage(ctx context.Context, msg IncomingMessage) error {
-	text := strings.TrimSpace(msg.Text)
-	if text == "" {
+	if strings.TrimSpace(msg.Text) == "" {
 		return nil
 	}
 	if msg.GroupID != s.opts.GroupID {
 		return nil
 	}
+	if s.markMessageSeen(msg.MessageID) {
+		return nil
+	}
 
 	rt := s.ensureRuntime()
 	select {
-	case rt.queue <- text:
+	case rt.queue <- msg.Text:
 		return nil
 	default:
+		s.forgetMessage(msg.MessageID)
 		return s.messenger.SendTextToChat(ctx, s.opts.GroupID, "This chat queue is full. Please try again shortly.")
+	}
+}
+
+func (s *Service) markMessageSeen(messageID string) bool {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.recentMessageSet[messageID]; exists {
+		return true
+	}
+	if s.recentMessageSet == nil {
+		s.recentMessageSet = make(map[string]struct{}, recentMessageIDLimit)
+	}
+
+	s.recentMessageIDs = append(s.recentMessageIDs, messageID)
+	s.recentMessageSet[messageID] = struct{}{}
+
+	if len(s.recentMessageIDs) > recentMessageIDLimit {
+		oldest := s.recentMessageIDs[0]
+		s.recentMessageIDs = s.recentMessageIDs[1:]
+		delete(s.recentMessageSet, oldest)
+	}
+	return false
+}
+
+func (s *Service) forgetMessage(messageID string) {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.recentMessageSet[messageID]; !exists {
+		return
+	}
+	delete(s.recentMessageSet, messageID)
+	for i, seenID := range s.recentMessageIDs {
+		if seenID == messageID {
+			s.recentMessageIDs = append(s.recentMessageIDs[:i], s.recentMessageIDs[i+1:]...)
+			break
+		}
 	}
 }
 
@@ -132,7 +188,6 @@ func (s *Service) runGroup(rt *groupRuntime) {
 			rt.pending = append(rt.pending, text)
 			if err := s.ensureSession(rt); err != nil {
 				s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("[imcodex] Failed to start session: %v", err))
-				rt.pending = nil
 				continue
 			}
 			if !rt.lastBusy && len(rt.pending) > 0 {
@@ -140,6 +195,16 @@ func (s *Service) runGroup(rt *groupRuntime) {
 			}
 		case <-ticker.C:
 			if !rt.sessionReady {
+				if len(rt.pending) == 0 {
+					continue
+				}
+				if err := s.ensureSession(rt); err != nil {
+					s.logger.Warn("retry ensure session failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
+					continue
+				}
+				if !rt.lastBusy && len(rt.pending) > 0 {
+					s.dispatchNext(rt)
+				}
 				continue
 			}
 			s.poll(rt)
@@ -189,6 +254,7 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 	if err := s.console.SendText(s.ctx, rt.session, text); err != nil {
 		s.logger.Error("send text to codex failed", "group_id", rt.opts.GroupID, "err", err)
 		s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("[imcodex] Failed to send to Codex: %v", err))
+		rt.pending = append([]string{text}, rt.pending...)
 		rt.sessionReady = false
 		rt.lastBusy = false
 		rt.idleTicks = 0

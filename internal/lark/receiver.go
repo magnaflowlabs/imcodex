@@ -90,14 +90,14 @@ func eventToIncomingMessage(event *larkim.P2MessageReceiveV1) (gateway.IncomingM
 	if err != nil {
 		return gateway.IncomingMessage{}, false, err
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		return gateway.IncomingMessage{}, false, nil
 	}
 
 	return gateway.IncomingMessage{
-		GroupID: groupID,
-		Text:    text,
+		MessageID: strings.TrimSpace(stringValue(msg.MessageId)),
+		GroupID:   groupID,
+		Text:      text,
 	}, true, nil
 }
 

@@ -16,6 +16,7 @@ func TestEventToIncomingMessageAcceptsGroupText(t *testing.T) {
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{SenderType: stringPtr("user")},
 			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_1"),
 				ChatId:      stringPtr("oc_1"),
 				ChatType:    stringPtr("group"),
 				MessageType: stringPtr("text"),
@@ -29,8 +30,34 @@ func TestEventToIncomingMessageAcceptsGroupText(t *testing.T) {
 	if !ok {
 		t.Fatal("ok = false, want true")
 	}
-	if msg.GroupID != "oc_1" || msg.Text != "/new" {
+	if msg.MessageID != "om_1" || msg.GroupID != "oc_1" || msg.Text != " /new " {
 		t.Fatalf("msg = %#v, want group=text pair", msg)
+	}
+}
+
+func TestEventToIncomingMessagePreservesTrailingNewlines(t *testing.T) {
+	t.Parallel()
+
+	msg, ok, err := eventToIncomingMessage(&larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{SenderType: stringPtr("user")},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_2"),
+				ChatId:      stringPtr("oc_1"),
+				ChatType:    stringPtr("group"),
+				MessageType: stringPtr("text"),
+				Content:     stringPtr(`{"text":"line1\n\n"}`),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("eventToIncomingMessage() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if msg.Text != "line1\n\n" {
+		t.Fatalf("msg.Text = %q, want preserved trailing newlines", msg.Text)
 	}
 }
 
