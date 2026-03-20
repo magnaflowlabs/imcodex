@@ -69,7 +69,7 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 		path:          path,
 		larkAppID:     firstNonEmpty(file.LarkAppID, envValue(lookupEnv, "LARK_APP_ID")),
 		larkAppSecret: firstNonEmpty(file.LarkAppSecret, envValue(lookupEnv, "LARK_APP_SECRET")),
-		larkBaseURL:   firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.FeishuBaseUrl),
+		larkBaseURL:   firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
 		groups:        normalizeGroups(file.Groups),
 	}
 	if err := cfg.validate(); err != nil {

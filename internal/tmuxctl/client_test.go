@@ -113,6 +113,16 @@ func TestClientEnsureSessionRecreatesMissingControlPane(t *testing.T) {
 	waitForCaptureContains(t, client, spec.SessionName, "after recreate")
 }
 
+func TestDefaultLaunchCommandUsesNeverApprovalAndDangerFullAccess(t *testing.T) {
+	t.Parallel()
+
+	got := defaultLaunchCommand(SessionSpec{CWD: "/srv/demo"})
+	want := "exec 'codex' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C' '/srv/demo'"
+	if got != want {
+		t.Fatalf("defaultLaunchCommand() = %q, want %q", got, want)
+	}
+}
+
 func newTestClient() *Client {
 	client := New()
 	client.enterWait = 0

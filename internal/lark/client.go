@@ -28,7 +28,7 @@ type Client struct {
 func NewClient(appID string, appSecret string, baseURL string) *Client {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
-		baseURL = larksdk.FeishuBaseUrl
+		baseURL = larksdk.LarkBaseUrl
 	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),

@@ -28,7 +28,7 @@ type Receiver struct {
 func NewReceiver(appID string, appSecret string, baseURL string, handler MessageHandler) *Receiver {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
-		baseURL = larksdk.FeishuBaseUrl
+		baseURL = larksdk.LarkBaseUrl
 	}
 
 	dispatcher := newEventDispatcher(handler)

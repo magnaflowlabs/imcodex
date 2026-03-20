@@ -1,30 +1,39 @@
 # imcodex
 
-`imcodex` connects a Lark/Feishu group chat to a long-running Codex CLI session inside `tmux`.
+`imcodex` connects a Lark group chat to a long-running Codex CLI session on your machine and sends new Codex output back to the group.
 
-In practice:
+Use it when:
 
-- send a text message in a configured group
-- `imcodex` forwards it to Codex in the matching working directory
-- Codex output is captured from `tmux` and sent back to the group
+- one Lark group should map to one project directory
+- Codex should stay alive in the background
+- people should talk to Codex directly from the group
 
-Each configured group gets its own `tmux` session and its own Codex context.
+It does not need a public webhook or an inbound port.
+
+## Important
+
+`imcodex` starts Codex in automatic mode:
+
+- approval policy: `never`
+- sandbox mode: `danger-full-access`
+- directory trust prompt: auto-confirmed
+- command approval prompt: auto-confirmed if it still appears
+
+Only run this on a machine you control and trust.
 
 ## Requirements
 
-- Go 1.24+
-- `tmux` in `PATH`
-- `codex` in `PATH`
-- a Lark/Feishu app with bot capability
-- `lark_app_id` and `lark_app_secret`
+You do not need to know Go to use it, but you do need these tools installed:
 
-`upx` is optional. It is only needed for `make linux`.
+- `tmux`
+- Codex CLI, with `codex login` already completed
+- Go 1.24+ to build the binary locally
+- a Lark bot app with `app_id` and `app_secret`
+- the target group `group_id`
 
 ## Install
 
 ### macOS
-
-Install runtime dependencies:
 
 ```bash
 brew install tmux
@@ -32,35 +41,13 @@ npm install -g @openai/codex
 codex login
 ```
 
-Optional build dependency:
-
-```bash
-brew install upx
-```
-
-If you want to use the CLI bundled inside the Codex desktop app instead of the npm package:
-
-```bash
-echo 'export PATH="/Applications/Codex.app/Contents/Resources:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-codex --version
-```
-
 ### Ubuntu 24.04
-
-Install runtime dependencies:
 
 ```bash
 sudo apt update
-sudo apt install -y tmux nodejs npm
+sudo apt install -y tmux
 sudo npm install -g @openai/codex
 codex login
-```
-
-Optional build dependency:
-
-```bash
-# Install UPX only if you plan to run `make linux`.
 ```
 
 ### Verify the toolchain
@@ -71,38 +58,25 @@ tmux -V
 codex --version
 ```
 
-## Lark / Feishu Setup
+## Lark setup
 
-1. Create or open your app in Lark/Feishu Open Platform.
+1. Create or open your Lark bot app.
 2. Enable bot capability.
-3. Subscribe to the message receive event `im.message.receive_v1`.
-4. Add the bot to every target group.
-5. Copy the target group ID from the group settings UI.
+3. Subscribe to the `im.message.receive_v1` event.
+4. Add the bot to the group you want to use.
+5. Copy the group `group_id` from group settings.
 
-Recommended permissions:
+## Config file
 
-- group message receive permission, if you want all group messages
-- or at-bot message receive permission, if you only want messages that mention the bot
-
-Group ID lookup:
-
-1. Open the target group.
-2. Open Group Settings / Chat Settings.
-3. Copy the Group ID or Chat ID shown by the client.
-4. Put that value into `groups[].group_id`.
-
-## Configuration
-
-The default config path is `./imcodex.yaml`. You can override it with `-config /path/to/imcodex.yaml`.
+The default config file name is `imcodex.yaml`.
 
 Start from the example:
 
 ```bash
-cp config.example.yaml config.yaml
-$EDITOR config.yaml
+cp config.example.yaml imcodex.yaml
 ```
 
-Minimal example:
+Minimal config:
 
 ```yaml
 lark_app_id: cli_xxx
@@ -111,21 +85,15 @@ lark_base_url: https://open.larksuite.com
 groups:
   - group_id: oc_xxx
     cwd: /srv/my-project
-  - group_id: oc_yyy
-    cwd: /srv/another-project
 ```
 
-Config fields:
+For Feishu China, use:
 
-| Key | Description |
-|---|---|
-| `lark_app_id` / `LARK_APP_ID` | Lark/Feishu app ID |
-| `lark_app_secret` / `LARK_APP_SECRET` | Lark/Feishu app secret |
-| `lark_base_url` / `LARK_BASE_URL` | `https://open.larksuite.com` for Lark, `https://open.feishu.cn` for Feishu China |
-| `groups[].group_id` | target group ID |
-| `groups[].cwd` | working directory for the Codex session behind that group |
+```yaml
+lark_base_url: https://open.feishu.cn
+```
 
-You can also keep secrets in the environment:
+You can also keep secrets in environment variables:
 
 ```bash
 export LARK_APP_ID=cli_xxx
@@ -133,128 +101,81 @@ export LARK_APP_SECRET=your_app_secret
 export LARK_BASE_URL=https://open.larksuite.com
 ```
 
-Do not commit real secrets.
+Field meanings:
 
-## Build
+- `lark_app_id`: Lark bot app ID
+- `lark_app_secret`: Lark bot app secret
+- `lark_base_url`: API base URL for Lark or Feishu
+- `groups[].group_id`: group mapped to Codex
+- `groups[].cwd`: project directory for that group
+
+Add more entries under `groups:` if you want to connect multiple groups.
+
+## Start
+
+Build and run:
 
 ```bash
 make
+./build/imcodex-$(go env GOOS)-$(go env GOARCH) -config imcodex.yaml
 ```
 
-This creates:
+If you use the default file name `imcodex.yaml`, `-config` is optional:
+
+```bash
+./build/imcodex-$(go env GOOS)-$(go env GOARCH)
+```
+
+Successful startup looks like:
 
 ```text
-./build/imcodex-<goos>-<goarch>
+imcodex started: config=imcodex.yaml groups=1 base=https://open.larksuite.com
 ```
 
-Other build targets:
+## Daily use
 
-- `make linux`: build a compressed Linux release binary
-- `make test`: run `go test ./...` and `go test -race ./...`
+After startup, just send messages in the configured Lark group.
 
-## Run
-
-From source:
-
-```bash
-go run . -config config.yaml
-```
-
-From a built binary:
-
-```bash
-./build/imcodex-$(go env GOOS)-$(go env GOARCH) -config config.yaml
-```
-
-On startup, `imcodex` opens one long connection to Lark/Feishu and lazily creates `tmux` sessions when the first message arrives for each group.
-
-## Daily Use
-
-What happens when you use it:
-
-- plain text sent in a configured group is forwarded to Codex
-- slash commands such as `/new`, `/compact`, and `/status` are passed through as normal text
-- each group is serialized through its own queue
+- plain text is forwarded to Codex
+- commands such as `/new`, `/compact`, and `/status` are forwarded as-is
+- messages in the same group are queued
 - different groups run independently
-- if `imcodex` restarts, existing `tmux` sessions are reused
+- existing `tmux` sessions are reused after restart
 
-The generated `tmux` session name looks like:
+## View the tmux session
 
-```text
-imcodex-<cwd-base>-<group-id>
-```
-
-Useful commands:
+List sessions:
 
 ```bash
 tmux ls
-tmux attach -r -t <session>
-tmux list-panes -t <session> -F '#{pane_id} #{pane_current_command}'
 ```
 
-`imcodex` keeps a stable control pane inside each session and will continue using that pane even if pane indexes change.
+Attach read-only:
+
+```bash
+tmux attach -r -t <session-name>
+```
 
 ## Troubleshooting
 
-### Nothing is forwarded from the group
+### Messages are not forwarded
 
 Check:
 
-- the bot is in the group
-- the group ID in `config.yaml` matches the real group
-- the app subscribed to `im.message.receive_v1`
-- the app has the right message receive permission
+- the bot is in the target group
+- `group_id` matches the real group
+- `codex login` is complete
+- `tmux` and `codex` are in `PATH`
+- `imcodex.yaml` is the file actually being loaded
 
-### `tmux` session is not created
+### The tmux session is missing after restart
 
-Check:
+If the `tmux` session does not exist, `imcodex` recreates it when the next message arrives.
 
-- `tmux` is installed
-- `tmux` is in `PATH`
-- the configured `cwd` exists
+### I want multiple projects
 
-### Codex does not start
-
-Check:
-
-- `codex` is installed
-- `codex` is in `PATH`
-- `codex login` already succeeded on that machine
-
-### I want to inspect what Codex is doing
-
-Use:
-
-```bash
-tmux ls
-tmux attach -r -t <session>
-tmux list-panes -t <session> -F '#{pane_id} #{pane_current_command}'
-```
-
-Read-only attach is still the safest option.
-
-Writable attach is supported, but there is one important boundary:
-
-- if you only observe, switch windows, or rearrange panes, `imcodex` should keep working
-- if you exit Codex, kill the control pane, or replace it with another program, `imcodex` will recreate a new control pane inside the same tmux session
-
-## Development
-
-```bash
-make
-make linux
-make test
-```
+Add multiple entries under `groups:`. One entry is one group and one working directory.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## References
-
-- [Codex CLI overview](https://openai.com/codex/)
-- [Codex CLI getting started](https://help.openai.com/en/articles/11096431-openai-codex-cli-getting-started)
-- [Codex CLI sign-in with ChatGPT](https://help.openai.com/en/articles/11381614-codex-cli-and-sign-in-with-chatgpt)
-- [Lark Developer](https://open.larksuite.com/?lang=en-US)
-- [Receive message event: `im.message.receive_v1`](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)
-- [Create message API: `POST /open-apis/im/v1/messages`](https://open.feishu.cn/document/server-docs/im-v1/message/create)

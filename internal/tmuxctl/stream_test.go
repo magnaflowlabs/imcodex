@@ -73,6 +73,21 @@ func TestDiffTextHandlesShiftedWindow(t *testing.T) {
 	}
 }
 
+func TestDiffTextUsesOverlapInsideRedraw(t *testing.T) {
+	t.Parallel()
+
+	prev := "• Hello"
+	curr := "status\n• Hello\n• World"
+
+	delta, reset := DiffText(prev, curr)
+	if reset {
+		t.Fatal("reset = true, want false")
+	}
+	if got, want := delta, "\n• World"; got != want {
+		t.Fatalf("delta = %q, want %q", got, want)
+	}
+}
+
 func TestDiffTextReturnsCurrentSnapshotOnReset(t *testing.T) {
 	t.Parallel()
 
@@ -94,5 +109,25 @@ func TestIsBusy(t *testing.T) {
 	raw := "• Working (2s • esc to interrupt)"
 	if !IsBusy(raw) {
 		t.Fatal("IsBusy() = false, want true")
+	}
+}
+
+func TestIsApprovalPrompt(t *testing.T) {
+	t.Parallel()
+
+	raw := `Allow command in sandbox?
+Run command: rm -rf /tmp/demo
+[ Allow ] [ Deny ]`
+	if !IsApprovalPrompt(raw) {
+		t.Fatal("IsApprovalPrompt() = false, want true")
+	}
+}
+
+func TestIsApprovalPromptIgnoresRegularOutput(t *testing.T) {
+	t.Parallel()
+
+	raw := "We should allow this deploy after sandbox validation."
+	if IsApprovalPrompt(raw) {
+		t.Fatal("IsApprovalPrompt() = true, want false")
 	}
 }

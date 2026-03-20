@@ -19,6 +19,13 @@ const (
 	recentMessageIDLimit = 256
 )
 
+var approvalPromptAttempts = [][]string{
+	{"Enter"},
+	{"Tab", "Enter"},
+	{"Right", "Enter"},
+	{"Down", "Enter"},
+}
+
 type IncomingMessage struct {
 	MessageID string
 	GroupID   string
@@ -39,17 +46,19 @@ type Console interface {
 	EnsureSession(ctx context.Context, spec tmuxctl.SessionSpec) (bool, error)
 	SendText(ctx context.Context, session string, text string) error
 	Capture(ctx context.Context, session string, history int) (string, error)
+	SendKey(ctx context.Context, session string, key string) error
 }
 
 type Service struct {
-	ctx       context.Context
-	opts      Options
-	messenger Messenger
-	console   Console
-	logger    *slog.Logger
-	pollEvery time.Duration
-	startWait time.Duration
-	history   int
+	ctx        context.Context
+	opts       Options
+	messenger  Messenger
+	console    Console
+	logger     *slog.Logger
+	pollEvery  time.Duration
+	promptWait time.Duration
+	startWait  time.Duration
+	history    int
 
 	mu      sync.Mutex
 	runtime *groupRuntime
@@ -78,14 +87,15 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		opts.SessionName = DefaultSessionName(opts.CWD)
 	}
 	return &Service{
-		ctx:       ctx,
-		opts:      opts,
-		messenger: messenger,
-		console:   console,
-		logger:    logger,
-		pollEvery: time.Second,
-		startWait: 4 * time.Second,
-		history:   2000,
+		ctx:        ctx,
+		opts:       opts,
+		messenger:  messenger,
+		console:    console,
+		logger:     logger,
+		pollEvery:  time.Second,
+		promptWait: 100 * time.Millisecond,
+		startWait:  4 * time.Second,
+		history:    2000,
 	}
 }
 
@@ -218,10 +228,11 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	}
 
 	created, err := s.console.EnsureSession(s.ctx, tmuxctl.SessionSpec{
-		SessionName:                 rt.session,
-		CWD:                         rt.opts.CWD,
-		StartupWait:                 s.startWait,
-		AutoPressEnterOnTrustPrompt: true,
+		SessionName:                    rt.session,
+		CWD:                            rt.opts.CWD,
+		StartupWait:                    s.startWait,
+		AutoPressEnterOnTrustPrompt:    true,
+		AutoPressEnterOnApprovalPrompt: true,
 	})
 	if err != nil {
 		return err
@@ -279,6 +290,18 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.outputBuffer = ""
 		return
 	}
+	if tmuxctl.IsApprovalPrompt(snapshot) {
+		resolvedSnapshot, resolved, err := s.dismissApprovalPrompt(rt)
+		if err != nil {
+			s.logger.Warn("dismiss approval prompt failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
+			return
+		}
+		if !resolved {
+			s.logger.Warn("approval prompt still visible after auto-confirm attempts", "group_id", rt.opts.GroupID, "session", rt.session)
+			return
+		}
+		snapshot = resolvedSnapshot
+	}
 
 	currText := tmuxctl.NormalizeSnapshot(snapshot)
 	delta, reset := tmuxctl.DiffText(rt.lastText, currText)
@@ -290,11 +313,14 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.idleTicks++
 	}
 
-	if reset {
-		rt.outputBuffer = ""
-	}
 	if delta != "" {
-		rt.outputBuffer += delta
+		if reset {
+			rt.outputBuffer = delta
+		} else {
+			rt.outputBuffer += delta
+		}
+	} else if reset {
+		rt.outputBuffer = ""
 	}
 	if shouldFlush(rt.outputBuffer, busy, rt.idleTicks) {
 		s.sendChunked(rt.opts.GroupID, strings.Trim(rt.outputBuffer, "\n"))
@@ -307,6 +333,29 @@ func (s *Service) poll(rt *groupRuntime) {
 	if !busy && len(rt.pending) > 0 {
 		s.dispatchNext(rt)
 	}
+}
+
+func (s *Service) dismissApprovalPrompt(rt *groupRuntime) (string, bool, error) {
+	for _, keys := range approvalPromptAttempts {
+		for _, key := range keys {
+			if err := s.console.SendKey(s.ctx, rt.session, key); err != nil {
+				return "", false, err
+			}
+		}
+		if s.promptWait > 0 {
+			time.Sleep(s.promptWait)
+		}
+
+		snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
+		if err != nil {
+			return "", false, err
+		}
+		if !tmuxctl.IsApprovalPrompt(snapshot) {
+			return snapshot, true, nil
+		}
+	}
+
+	return "", false, nil
 }
 
 func shouldFlush(buffer string, busy bool, idleTicks int) bool {

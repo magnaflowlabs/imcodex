@@ -26,8 +26,8 @@ groups:
 	if cfg.larkAppSecret != "secret_env" {
 		t.Fatalf("larkAppSecret = %q, want %q", cfg.larkAppSecret, "secret_env")
 	}
-	if cfg.larkBaseURL != "https://open.feishu.cn" {
-		t.Fatalf("larkBaseURL = %q, want %q", cfg.larkBaseURL, "https://open.feishu.cn")
+	if cfg.larkBaseURL != "https://open.larksuite.com" {
+		t.Fatalf("larkBaseURL = %q, want %q", cfg.larkBaseURL, "https://open.larksuite.com")
 	}
 	if len(cfg.groups) != 1 || cfg.groups[0].GroupID != "oc_1" || cfg.groups[0].CWD != "/srv/demo" {
 		t.Fatalf("groups = %#v, want one normalized group", cfg.groups)

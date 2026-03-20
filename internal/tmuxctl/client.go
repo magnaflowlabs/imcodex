@@ -14,10 +14,11 @@ const (
 )
 
 type SessionSpec struct {
-	SessionName                 string
-	CWD                         string
-	StartupWait                 time.Duration
-	AutoPressEnterOnTrustPrompt bool
+	SessionName                    string
+	CWD                            string
+	StartupWait                    time.Duration
+	AutoPressEnterOnTrustPrompt    bool
+	AutoPressEnterOnApprovalPrompt bool
 }
 
 type Client struct {
@@ -66,6 +67,15 @@ func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, err
 			time.Sleep(wait / 2)
 		}
 	}
+	if spec.AutoPressEnterOnApprovalPrompt {
+		snapshot, err := c.Capture(ctx, spec.SessionName, 200)
+		if err == nil && IsApprovalPrompt(snapshot) {
+			if err := c.sendKey(ctx, spec.SessionName, "Enter"); err != nil {
+				return false, err
+			}
+			time.Sleep(wait / 4)
+		}
+	}
 
 	return created, nil
 }
@@ -104,6 +114,10 @@ func (c *Client) Capture(ctx context.Context, session string, history int) (stri
 		return "", fmt.Errorf("capture tmux pane: %w", err)
 	}
 	return out, nil
+}
+
+func (c *Client) SendKey(ctx context.Context, session string, key string) error {
+	return c.sendKey(ctx, session, key)
 }
 
 func (c *Client) hasSession(ctx context.Context, session string) (bool, error) {
@@ -290,7 +304,13 @@ func (c *Client) command(spec SessionSpec) string {
 }
 
 func defaultLaunchCommand(spec SessionSpec) string {
-	return "exec " + shellJoin("codex", "--no-alt-screen", "-C", spec.CWD)
+	return "exec " + shellJoin(
+		"codex",
+		"-a", "never",
+		"-s", "danger-full-access",
+		"--no-alt-screen",
+		"-C", spec.CWD,
+	)
 }
 
 func shellJoin(args ...string) string {

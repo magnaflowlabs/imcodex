@@ -1,6 +1,7 @@
 APP := imcodex
 GO ?= go
 UPX ?= upx
+HAVE_UPX := $(shell command -v $(UPX) >/dev/null 2>&1 && echo yes || echo no)
 
 LOCAL_GOOS := $(shell $(GO) env GOOS)
 LOCAL_GOARCH := $(shell $(GO) env GOARCH)
@@ -30,8 +31,11 @@ build-local:
 ifeq ($(LOCAL_GOOS),darwin)
 	@echo "skip upx for macOS: packed binary is killed by macOS at launch"
 else
-	@command -v $(UPX) >/dev/null 2>&1 || { echo "$(UPX) not found"; exit 1; }
+ifeq ($(HAVE_UPX),yes)
 	$(UPX) -q $(LOCAL_BIN)
+else
+	@echo "skip upx for local build: $(UPX) not found"
+endif
 endif
 
 build-linux:

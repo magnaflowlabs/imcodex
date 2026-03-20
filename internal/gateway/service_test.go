@@ -36,6 +36,7 @@ type fakeConsole struct {
 	mu           sync.Mutex
 	captures     []string
 	sendTexts    []string
+	sendKeys     []string
 	ensureErrors []error
 	sendErrors   []error
 }
@@ -84,6 +85,13 @@ func (f *fakeConsole) Capture(context.Context, string, int) (string, error) {
 	return out, nil
 }
 
+func (f *fakeConsole) SendKey(_ context.Context, _ string, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sendKeys = append(f.sendKeys, key)
+	return nil
+}
+
 func TestServiceBridgesMessageToConsole(t *testing.T) {
 	t.Parallel()
 
@@ -125,6 +133,121 @@ func TestServiceBridgesMessageToConsole(t *testing.T) {
 	t.Fatalf("messages = %#v, want processing + output", messenger.all())
 }
 
+func TestServiceOnlySendsNewContentAfterSnapshotScroll(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• Alpha\n• Beta",
+			"• Beta\n• Gamma",
+			"• Beta\n• Gamma",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		GroupID: "oc_1",
+		Text:    "summarize progress",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		texts := messenger.all()
+		outputs := make([]string, 0, len(texts))
+		for _, text := range texts {
+			if strings.HasPrefix(text, "[working]") || strings.HasPrefix(text, "[imcodex]") {
+				continue
+			}
+			outputs = append(outputs, text)
+		}
+		if len(outputs) >= 2 {
+			if got, want := outputs[0], "• Alpha\n• Beta"; got != want {
+				t.Fatalf("texts[1] = %q, want %q", got, want)
+			}
+			if got, want := outputs[1], "• Gamma"; got != want {
+				t.Fatalf("texts[2] = %q, want %q", got, want)
+			}
+			if strings.Contains(outputs[1], "Beta") {
+				t.Fatalf("texts[2] = %q, want only new content", outputs[1])
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("messages = %#v, want processing + distinct incremental outputs", messenger.all())
+}
+
+func TestServiceDismissesApprovalPromptDuringPoll(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	approval := `Allow command in sandbox?
+Run command: rm -rf /tmp/demo
+[ Allow ] [ Deny ]`
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			approval,
+			approval,
+			"• Hello after approval",
+			"• Hello after approval",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.promptWait = 0
+	svc.history = 2000
+	svc.startWait = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		GroupID: "oc_1",
+		Text:    "trigger approval",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		console.mu.Lock()
+		keys := append([]string(nil), console.sendKeys...)
+		console.mu.Unlock()
+		if len(keys) >= 3 {
+			if got, want := keys, []string{"Enter", "Tab", "Enter"}; !equalStrings(got[:3], want) {
+				t.Fatalf("sendKeys[:3] = %#v, want %#v", got[:3], want)
+			}
+
+			texts := messenger.all()
+			joined := strings.Join(texts, "\n")
+			if strings.Contains(joined, "Allow command in sandbox?") {
+				t.Fatalf("messages = %#v, want approval prompt hidden from Lark", texts)
+			}
+			if strings.Contains(joined, "Hello after approval") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("sendKeys = %#v messages = %#v, want approval prompt auto-dismissed", console.sendKeys, messenger.all())
+}
+
 func TestServiceRejectsUnknownGroup(t *testing.T) {
 	t.Parallel()
 
@@ -146,6 +269,18 @@ func TestServiceRejectsUnknownGroup(t *testing.T) {
 	if len(texts) != 0 {
 		t.Fatalf("messages = %#v, want ignored unknown-group message", texts)
 	}
+}
+
+func equalStrings(got []string, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestServiceDoesNotDispatchSecondMessageImmediately(t *testing.T) {
