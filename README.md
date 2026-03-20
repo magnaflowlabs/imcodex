@@ -189,10 +189,10 @@ Useful commands:
 ```bash
 tmux ls
 tmux attach -r -t <session>
-tmux capture-pane -pJ -S -200 -t <session>:0.0
+tmux list-panes -t <session> -F '#{pane_id} #{pane_current_command}'
 ```
 
-Use `tmux attach -r` for observation. Avoid typing into the same session while the bridge is active.
+`imcodex` keeps a stable control pane inside each session and will continue using that pane even if pane indexes change.
 
 ## Troubleshooting
 
@@ -228,9 +228,15 @@ Use:
 ```bash
 tmux ls
 tmux attach -r -t <session>
+tmux list-panes -t <session> -F '#{pane_id} #{pane_current_command}'
 ```
 
-Read-only attach is recommended. If you type into the same session, you are sharing the terminal with the bridge.
+Read-only attach is still the safest option.
+
+Writable attach is supported, but there is one important boundary:
+
+- if you only observe, switch windows, or rearrange panes, `imcodex` should keep working
+- if you exit Codex, kill the control pane, or replace it with another program, `imcodex` will recreate a new control pane inside the same tmux session
 
 ## Development
 
