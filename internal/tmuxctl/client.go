@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+const (
+	controlPaneOption = "@imcodex-control-pane"
+	controlWindowName = "imcodex"
+)
+
 type SessionSpec struct {
 	SessionName                 string
 	CWD                         string
@@ -16,14 +21,16 @@ type SessionSpec struct {
 }
 
 type Client struct {
-	bin       string
-	enterWait time.Duration
+	bin           string
+	enterWait     time.Duration
+	launchCommand func(SessionSpec) string
 }
 
 func New() *Client {
 	return &Client{
-		bin:       "tmux",
-		enterWait: 250 * time.Millisecond,
+		bin:           "tmux",
+		enterWait:     250 * time.Millisecond,
+		launchCommand: defaultLaunchCommand,
 	}
 }
 
@@ -32,13 +39,16 @@ func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, err
 	if err != nil {
 		return false, err
 	}
+	created := false
 	if ok {
-		return false, nil
-	}
-
-	command := "exec " + shellJoin("codex", "--no-alt-screen", "-C", spec.CWD)
-	if err := c.run(ctx, "new-session", "-d", "-s", spec.SessionName, command); err != nil {
-		return false, fmt.Errorf("create tmux session: %w", err)
+		if err := c.ensureControlPane(ctx, spec); err != nil {
+			return false, err
+		}
+	} else {
+		if err := c.createSession(ctx, spec); err != nil {
+			return false, err
+		}
+		created = true
 	}
 
 	wait := spec.StartupWait
@@ -57,7 +67,7 @@ func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, err
 		}
 	}
 
-	return true, nil
+	return created, nil
 }
 
 func (c *Client) SendText(ctx context.Context, session string, text string) error {
@@ -65,7 +75,11 @@ func (c *Client) SendText(ctx context.Context, session string, text string) erro
 	if err := c.run(ctx, "set-buffer", "-b", bufferName, "--", text); err != nil {
 		return fmt.Errorf("set tmux buffer: %w", err)
 	}
-	if err := c.run(ctx, "paste-buffer", "-d", "-b", bufferName, "-t", paneTarget(session)); err != nil {
+	target, err := c.controlPaneTarget(ctx, session)
+	if err != nil {
+		return err
+	}
+	if err := c.run(ctx, "paste-buffer", "-d", "-b", bufferName, "-t", target); err != nil {
 		return fmt.Errorf("paste tmux buffer: %w", err)
 	}
 	if c.enterWait > 0 {
@@ -81,7 +95,11 @@ func (c *Client) Capture(ctx context.Context, session string, history int) (stri
 	if history <= 0 {
 		history = 2000
 	}
-	out, err := c.output(ctx, "capture-pane", "-pJ", "-S", fmt.Sprintf("-%d", history), "-t", paneTarget(session))
+	target, err := c.controlPaneTarget(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	out, err := c.output(ctx, "capture-pane", "-pJ", "-S", fmt.Sprintf("-%d", history), "-t", target)
 	if err != nil {
 		return "", fmt.Errorf("capture tmux pane: %w", err)
 	}
@@ -100,7 +118,11 @@ func (c *Client) hasSession(ctx context.Context, session string) (bool, error) {
 }
 
 func (c *Client) sendKey(ctx context.Context, session string, key string) error {
-	if err := c.run(ctx, "send-keys", "-t", paneTarget(session), key); err != nil {
+	target, err := c.controlPaneTarget(ctx, session)
+	if err != nil {
+		return err
+	}
+	if err := c.run(ctx, "send-keys", "-t", target, key); err != nil {
 		return fmt.Errorf("send tmux key %s: %w", key, err)
 	}
 	return nil
@@ -123,8 +145,152 @@ func (c *Client) output(ctx context.Context, args ...string) (string, error) {
 	return string(out), nil
 }
 
-func paneTarget(session string) string {
-	return session + ":0.0"
+func (c *Client) createSession(ctx context.Context, spec SessionSpec) error {
+	paneID, err := c.output(ctx,
+		"new-session", "-d", "-P", "-F", "#{pane_id}",
+		"-s", spec.SessionName,
+		"-n", controlWindowName,
+		c.command(spec),
+	)
+	if err != nil {
+		return fmt.Errorf("create tmux session: %w", err)
+	}
+	return c.setControlPane(ctx, spec.SessionName, strings.TrimSpace(paneID))
+}
+
+func (c *Client) ensureControlPane(ctx context.Context, spec SessionSpec) error {
+	if _, err := c.controlPaneTarget(ctx, spec.SessionName); err == nil {
+		return nil
+	}
+
+	paneID, err := c.output(ctx,
+		"new-window", "-d", "-P", "-F", "#{pane_id}",
+		"-t", spec.SessionName,
+		"-n", controlWindowName,
+		c.command(spec),
+	)
+	if err != nil {
+		paneID, err = c.output(ctx,
+			"new-window", "-d", "-P", "-F", "#{pane_id}",
+			"-t", spec.SessionName,
+			c.command(spec),
+		)
+		if err != nil {
+			return fmt.Errorf("create tmux control pane: %w", err)
+		}
+	}
+	return c.setControlPane(ctx, spec.SessionName, strings.TrimSpace(paneID))
+}
+
+func (c *Client) controlPaneTarget(ctx context.Context, session string) (string, error) {
+	paneID, err := c.storedControlPane(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	if paneID != "" {
+		ok, err := c.hasPane(ctx, paneID)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return paneID, nil
+		}
+		paneID, err = c.findExistingControlPane(ctx, session, false)
+	} else {
+		paneID, err = c.findExistingControlPane(ctx, session, true)
+	}
+	if err != nil {
+		return "", err
+	}
+	if paneID == "" {
+		return "", fmt.Errorf("find tmux control pane in session %s: not found", session)
+	}
+	if err := c.setControlPane(ctx, session, paneID); err != nil {
+		return "", err
+	}
+	return paneID, nil
+}
+
+func (c *Client) storedControlPane(ctx context.Context, session string) (string, error) {
+	out, err := c.output(ctx, "show-options", "-qv", "-t", session, controlPaneOption)
+	if err != nil {
+		return "", fmt.Errorf("read tmux control pane option: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func (c *Client) setControlPane(ctx context.Context, session string, paneID string) error {
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" {
+		return fmt.Errorf("set tmux control pane: empty pane id")
+	}
+	if err := c.run(ctx, "set-option", "-q", "-t", session, controlPaneOption, paneID); err != nil {
+		return fmt.Errorf("set tmux control pane option: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) hasPane(ctx context.Context, paneID string) (bool, error) {
+	out, err := c.output(ctx, "display-message", "-p", "-t", paneID, "#{pane_id}")
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "can't find pane"),
+			strings.Contains(err.Error(), "can't find window"),
+			strings.Contains(err.Error(), "can't find session"):
+			return false, nil
+		default:
+			return false, fmt.Errorf("check tmux pane %s: %w", paneID, err)
+		}
+	}
+	return strings.TrimSpace(out) == paneID, nil
+}
+
+func (c *Client) findExistingControlPane(ctx context.Context, session string, allowSinglePaneFallback bool) (string, error) {
+	out, err := c.output(ctx, "list-panes", "-t", session, "-F", "#{pane_id}\t#{pane_current_command}")
+	if err != nil {
+		return "", fmt.Errorf("list tmux panes: %w", err)
+	}
+
+	type paneInfo struct {
+		id      string
+		command string
+	}
+	var panes []paneInfo
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		pane := paneInfo{id: strings.TrimSpace(parts[0])}
+		if len(parts) > 1 {
+			pane.command = strings.TrimSpace(parts[1])
+		}
+		if pane.id != "" {
+			panes = append(panes, pane)
+		}
+	}
+
+	for _, pane := range panes {
+		if pane.command == "codex" {
+			return pane.id, nil
+		}
+	}
+	if allowSinglePaneFallback && len(panes) == 1 {
+		return panes[0].id, nil
+	}
+	return "", nil
+}
+
+func (c *Client) command(spec SessionSpec) string {
+	if c.launchCommand != nil {
+		return c.launchCommand(spec)
+	}
+	return defaultLaunchCommand(spec)
+}
+
+func defaultLaunchCommand(spec SessionSpec) string {
+	return "exec " + shellJoin("codex", "--no-alt-screen", "-C", spec.CWD)
 }
 
 func shellJoin(args ...string) string {
