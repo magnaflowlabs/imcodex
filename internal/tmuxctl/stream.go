@@ -15,9 +15,6 @@ func NormalizeSnapshot(snapshot string) string {
 	prevBlank := false
 	for _, line := range lines {
 		line = strings.TrimRight(line, " \t\r")
-		if strings.HasPrefix(line, "  ") {
-			line = strings.TrimPrefix(line, "  ")
-		}
 		trimmed := strings.TrimSpace(line)
 
 		if trimmed == "" {
@@ -36,7 +33,10 @@ func NormalizeSnapshot(snapshot string) string {
 		prevBlank = false
 	}
 
-	return strings.TrimSpace(strings.Join(out, "\n"))
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
 }
 
 func DiffText(prev string, curr string) (string, bool) {
@@ -49,7 +49,11 @@ func DiffText(prev string, curr string) (string, bool) {
 	if strings.HasPrefix(curr, prev) {
 		return curr[len(prev):], false
 	}
-	return "", true
+
+	if overlap := suffixPrefixOverlap(prev, curr); overlap > 0 {
+		return curr[overlap:], false
+	}
+	return curr, true
 }
 
 func IsBusy(snapshot string) bool {
@@ -78,7 +82,7 @@ func shouldIgnoreLine(line string) bool {
 		strings.HasPrefix(line, "1. Yes, continue"),
 		strings.HasPrefix(line, "2. No, quit"),
 		strings.HasPrefix(line, "Press enter to continue"),
-		strings.HasPrefix(line, "›"):
+		line == "›":
 		return true
 	case strings.Contains(line, "chatgpt.com/codex"),
 		strings.Contains(line, "community.openai.com"),
@@ -88,4 +92,21 @@ func shouldIgnoreLine(line string) bool {
 	default:
 		return false
 	}
+}
+
+func suffixPrefixOverlap(prev string, curr string) int {
+	limit := min(len(prev), len(curr))
+	for size := limit; size > 0; size-- {
+		if prev[len(prev)-size:] == curr[:size] {
+			return size
+		}
+	}
+	return 0
+}
+
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

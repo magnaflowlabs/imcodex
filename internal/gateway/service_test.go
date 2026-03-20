@@ -402,3 +402,18 @@ func TestServiceRetriesFailedSendWithoutDroppingMessage(t *testing.T) {
 
 	t.Fatal("timed out waiting for send retry")
 }
+
+func TestServiceSendChunkedPreservesLeadingSpaces(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeMessenger{}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, slog.Default())
+
+	want := "    fmt.Println(\"hello\")"
+	svc.sendChunked("oc_1", want)
+
+	got := messenger.all()
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("messages = %#v, want preserved leading spaces", got)
+	}
+}

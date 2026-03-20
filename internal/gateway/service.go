@@ -290,11 +290,11 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.idleTicks++
 	}
 
-	if delta != "" {
-		rt.outputBuffer += delta
-	}
 	if reset {
 		rt.outputBuffer = ""
+	}
+	if delta != "" {
+		rt.outputBuffer += delta
 	}
 	if shouldFlush(rt.outputBuffer, busy, rt.idleTicks) {
 		s.sendChunked(rt.opts.GroupID, strings.Trim(rt.outputBuffer, "\n"))
@@ -323,8 +323,7 @@ func shouldFlush(buffer string, busy bool, idleTicks int) bool {
 }
 
 func (s *Service) sendChunked(groupID string, text string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		return
 	}
 	for _, chunk := range splitByRunes(text, maxMessageRunes) {
