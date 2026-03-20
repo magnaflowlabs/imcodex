@@ -1,35 +1,44 @@
 # imcodex
 
-`imcodex` connects a Lark group chat to a long-running Codex CLI session on your machine and sends new Codex output back to the group.
+`imcodex` bridges a Lark or Feishu group chat to a long-running Codex CLI session on your machine.
 
-Use it when:
+Each configured group maps to one working directory and one persistent `tmux`-hosted Codex session.
 
-- one Lark group should map to one project directory
-- Codex should stay alive in the background
-- people should talk to Codex directly from the group
+## Overview
 
-It does not need a public webhook or an inbound port.
+| Item | Behavior |
+| --- | --- |
+| Chat model | One group = one project directory = one Codex session |
+| Session host | `tmux` |
+| Event transport | Outbound Lark/Feishu WebSocket connection |
+| Public webhook | Not required |
+| Inbound port | Not required |
+| Verification token | Not required |
+| Multi-line user input | Sent to Codex as bracketed paste |
+| Output forwarded to chat | New assistant reply body |
+| Output hidden from chat | Codex terminal chrome and input box |
 
-## Important
+## Safety
 
-`imcodex` starts Codex in automatic mode:
+`imcodex` starts Codex with these defaults:
 
-- approval policy: `never`
-- sandbox mode: `danger-full-access`
-- directory trust prompt: auto-confirmed
-- command approval prompt: auto-confirmed if it still appears
+| Setting | Value |
+| --- | --- |
+| Approval policy | `never` |
+| Sandbox mode | `danger-full-access` |
+| Directory trust prompt | Auto-confirmed |
 
-Only run this on a machine you control and trust.
+Use it only on a machine you control and trust.
 
 ## Requirements
 
-You do not need to know Go to use it, but you do need these tools installed:
-
-- `tmux`
-- Codex CLI, with `codex login` already completed
-- Go 1.24+ to build the binary locally
-- a Lark bot app with `app_id` and `app_secret`
-- the target group `group_id`
+| Requirement | Notes |
+| --- | --- |
+| `tmux` | Required at runtime |
+| Codex CLI | `codex login` must already be complete |
+| Go 1.24+ | Required only if you build locally |
+| Lark/Feishu bot app | Needs `app_id` and `app_secret` |
+| Group ID | Copy it from the group settings page |
 
 ## Install
 
@@ -58,19 +67,22 @@ tmux -V
 codex --version
 ```
 
-## Lark setup
+## Lark or Feishu setup
 
-1. Create or open your Lark bot app.
+1. Create or open your bot app.
 2. Enable bot capability.
-3. Subscribe to the `im.message.receive_v1` event.
-4. Add the bot to the group you want to use.
-5. Copy the group `group_id` from group settings.
+3. Subscribe to `im.message.receive_v1`.
+4. Add the bot to the target group.
+5. Copy the group `group_id` from the group settings UI.
 
-## Config file
+## Configuration
 
-The default config file name is `imcodex.yaml`.
+If `-config` is not provided, `imcodex` looks for config files in this order:
 
-Start from the example:
+1. `./imcodex.yaml`
+2. `~/.imcodex.yaml`
+
+Create a config file from the example:
 
 ```bash
 cp config.example.yaml imcodex.yaml
@@ -87,13 +99,13 @@ groups:
     cwd: /srv/my-project
 ```
 
-For Feishu China, use:
+For Feishu China, set:
 
 ```yaml
 lark_base_url: https://open.feishu.cn
 ```
 
-You can also keep secrets in environment variables:
+Optional environment variables:
 
 ```bash
 export LARK_APP_ID=cli_xxx
@@ -101,58 +113,60 @@ export LARK_APP_SECRET=your_app_secret
 export LARK_BASE_URL=https://open.larksuite.com
 ```
 
-Field meanings:
+| Field | Meaning |
+| --- | --- |
+| `lark_app_id` | Bot app ID |
+| `lark_app_secret` | Bot app secret |
+| `lark_base_url` | API base URL for Lark or Feishu |
+| `groups[].group_id` | Group mapped to Codex |
+| `groups[].cwd` | Working directory for that group |
 
-- `lark_app_id`: Lark bot app ID
-- `lark_app_secret`: Lark bot app secret
-- `lark_base_url`: API base URL for Lark or Feishu
-- `groups[].group_id`: group mapped to Codex
-- `groups[].cwd`: project directory for that group
+Add more entries under `groups:` to connect more projects.
 
-Add more entries under `groups:` if you want to connect multiple groups.
+## Build
 
-## Start
+| Command | Output |
+| --- | --- |
+| `make` | Local binary in `build/` |
+| `make linux` | Linux `amd64` binary in `build/`, packed with `upx` |
+| `make test` | Unit tests, including `-race` |
 
-Build and run:
+Examples:
 
 ```bash
 make
 ./build/imcodex-$(go env GOOS)-$(go env GOARCH) -config imcodex.yaml
 ```
 
-If you use the default file name `imcodex.yaml`, `-config` is optional:
+If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 
 ```bash
 ./build/imcodex-$(go env GOOS)-$(go env GOARCH)
 ```
 
-Successful startup looks like:
+Expected startup log:
 
 ```text
 imcodex started: config=imcodex.yaml groups=1 base=https://open.larksuite.com
 ```
 
-## Daily use
+## Runtime behavior
 
-After startup, just send messages in the configured Lark group.
+After startup, send messages in the configured group as if you were talking directly to Codex.
 
-- plain text is forwarded to Codex
-- commands such as `/new`, `/compact`, and `/status` are forwarded as-is
-- messages in the same group are queued
-- different groups run independently
-- existing `tmux` sessions are reused after restart
+| Behavior | Details |
+| --- | --- |
+| Plain text | Forwarded to Codex |
+| Slash commands | Forwarded as-is, for example `/new`, `/compact`, `/status` |
+| Multi-line messages | Preserved as one pasted input |
+| Group queue | Messages are serialized per group |
+| Multiple groups | Run independently |
+| Restarts | Existing `tmux` sessions are reused |
 
-## View the tmux session
-
-List sessions:
+## Inspect the session
 
 ```bash
 tmux ls
-```
-
-Attach read-only:
-
-```bash
 tmux attach -r -t <session-name>
 ```
 
@@ -162,19 +176,20 @@ tmux attach -r -t <session-name>
 
 Check:
 
-- the bot is in the target group
-- `group_id` matches the real group
-- `codex login` is complete
-- `tmux` and `codex` are in `PATH`
-- `imcodex.yaml` is the file actually being loaded
+1. The bot is in the correct group.
+2. `group_id` matches the real group.
+3. Each configured `cwd` exists on the machine running `imcodex`.
+4. `codex login` has already completed.
+5. `tmux` and `codex` are in `PATH`.
+6. The startup log shows the config file you expected.
 
-### The tmux session is missing after restart
+### The session disappeared after a restart
 
-If the `tmux` session does not exist, `imcodex` recreates it when the next message arrives.
+If the `tmux` session no longer exists, `imcodex` recreates it when the next group message arrives.
 
-### I want multiple projects
+### I want more than one project
 
-Add multiple entries under `groups:`. One entry is one group and one working directory.
+Add more entries under `groups:`. Each entry is one group and one working directory.
 
 ## License
 

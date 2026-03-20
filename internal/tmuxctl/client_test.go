@@ -3,7 +3,9 @@ package tmuxctl
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -120,6 +122,74 @@ func TestDefaultLaunchCommandUsesNeverApprovalAndDangerFullAccess(t *testing.T) 
 	want := "exec 'codex' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C' '/srv/demo'"
 	if got != want {
 		t.Fatalf("defaultLaunchCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestClientSendTextUsesBracketedPaste(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	scriptPath := filepath.Join(dir, "tmux")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+case "$1" in
+  show-options)
+    printf '%%%%42\n'
+    ;;
+  display-message)
+    printf '%%%%42\n'
+    ;;
+esac
+`, shellQuote(logPath))
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	client := New()
+	client.bin = scriptPath
+	client.enterWait = 0
+
+	if err := client.SendText(context.Background(), "demo", "line1\nline2"); err != nil {
+		t.Fatalf("SendText() error = %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "paste-buffer -p -d -b imcodex-demo -t %42") {
+		t.Fatalf("tmux log = %q, want bracketed paste", logText)
+	}
+}
+
+func TestEnsureSessionRejectsMissingWorkingDirectory(t *testing.T) {
+	t.Parallel()
+
+	client := New()
+	_, err := client.EnsureSession(context.Background(), SessionSpec{
+		SessionName: "imcodex-test-missing-cwd",
+		CWD:         "/definitely/missing/imcodex",
+		StartupWait: 0,
+	})
+	if err == nil || !strings.Contains(err.Error(), "working directory does not exist") {
+		t.Fatalf("EnsureSession() error = %v, want missing working directory", err)
+	}
+}
+
+func TestValidateWorkingDirectoryRejectsFile(t *testing.T) {
+	t.Parallel()
+
+	file, err := os.CreateTemp(t.TempDir(), "imcodex-file")
+	if err != nil {
+		t.Fatalf("CreateTemp() error = %v", err)
+	}
+	file.Close()
+
+	err = validateWorkingDirectory(file.Name())
+	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("validateWorkingDirectory() error = %v, want not-a-directory", err)
 	}
 }
 

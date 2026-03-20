@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,51 @@ func TestParseConfigFlagOverridesDefaultPath(t *testing.T) {
 	}
 	if gotPath != "/tmp/imcodex.yaml" {
 		t.Fatalf("config path = %q, want %q", gotPath, "/tmp/imcodex.yaml")
+	}
+}
+
+func TestParseConfigFallsBackToUserHomeConfig(t *testing.T) {
+	t.Parallel()
+
+	var gotPaths []string
+	cfg, err := parseConfig(nil, envLookup(map[string]string{
+		"HOME":            "/home/demo",
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), func(path string) ([]byte, error) {
+		gotPaths = append(gotPaths, path)
+		switch path {
+		case defaultConfigPath:
+			return nil, os.ErrNotExist
+		case "/home/demo/.imcodex.yaml":
+			return []byte("groups:\n  - group_id: oc_1\n    cwd: /srv/demo\n"), nil
+		default:
+			t.Fatalf("unexpected config path read: %s", path)
+			return nil, nil
+		}
+	})
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	if cfg.path != "/home/demo/.imcodex.yaml" {
+		t.Fatalf("cfg.path = %q, want %q", cfg.path, "/home/demo/.imcodex.yaml")
+	}
+	if got, want := strings.Join(gotPaths, ","), "imcodex.yaml,/home/demo/.imcodex.yaml"; got != want {
+		t.Fatalf("config paths = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigReturnsHelpfulErrorWhenDefaultConfigsAreMissing(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, envLookup(map[string]string{
+		"HOME": "/home/demo",
+	}), func(string) ([]byte, error) {
+		return nil, os.ErrNotExist
+	})
+	if err == nil || !strings.Contains(err.Error(), "config not found; tried imcodex.yaml, /home/demo/.imcodex.yaml") {
+		t.Fatalf("parseConfig() error = %v, want missing-config paths", err)
 	}
 }
 

@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	larksdk "github.com/larksuite/oapi-sdk-go/v3"
 	"gopkg.in/yaml.v3"
 )
 
-const defaultConfigPath = "imcodex.yaml"
+const (
+	defaultConfigPath     = "imcodex.yaml"
+	defaultUserConfigName = ".imcodex.yaml"
+)
 
 type config struct {
 	path          string
@@ -39,8 +43,8 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 	fs := flag.NewFlagSet("imcodex", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	path := defaultConfigPath
-	fs.StringVar(&path, "config", defaultConfigPath, "Config file path")
+	var path string
+	fs.StringVar(&path, "config", "", "Config file path")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -49,13 +53,9 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 		readFile = os.ReadFile
 	}
 	path = strings.TrimSpace(path)
-	if path == "" {
-		return config{}, errors.New("required: -config")
-	}
-
-	data, err := readFile(path)
+	path, data, err := loadConfigFile(path, lookupEnv, readFile)
 	if err != nil {
-		return config{}, fmt.Errorf("read config %s: %w", path, err)
+		return config{}, err
 	}
 
 	var file fileConfig
@@ -76,6 +76,36 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 		return config{}, err
 	}
 	return cfg, nil
+}
+
+func loadConfigFile(path string, lookupEnv func(string) (string, bool), readFile func(string) ([]byte, error)) (string, []byte, error) {
+	if path != "" {
+		data, err := readFile(path)
+		if err != nil {
+			return "", nil, fmt.Errorf("read config %s: %w", path, err)
+		}
+		return path, data, nil
+	}
+
+	candidates := []string{defaultConfigPath}
+	if home := firstNonEmpty(envValue(lookupEnv, "HOME"), envValue(lookupEnv, "USERPROFILE")); home != "" {
+		candidates = append(candidates, filepath.Join(home, defaultUserConfigName))
+	}
+
+	var missing []string
+	for _, candidate := range candidates {
+		data, err := readFile(candidate)
+		if err == nil {
+			return candidate, data, nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			missing = append(missing, candidate)
+			continue
+		}
+		return "", nil, fmt.Errorf("read config %s: %w", candidate, err)
+	}
+
+	return "", nil, fmt.Errorf("config not found; tried %s", strings.Join(missing, ", "))
 }
 
 func normalizeGroups(groups []groupConfig) []groupConfig {

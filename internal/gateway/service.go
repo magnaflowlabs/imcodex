@@ -15,16 +15,11 @@ import (
 
 const (
 	maxMessageRunes      = 3000
+	streamFlushRunes     = 2400
+	quietFlushRunes      = 600
 	queueSize            = 64
 	recentMessageIDLimit = 256
 )
-
-var approvalPromptAttempts = [][]string{
-	{"Enter"},
-	{"Tab", "Enter"},
-	{"Right", "Enter"},
-	{"Down", "Enter"},
-}
 
 type IncomingMessage struct {
 	MessageID string
@@ -46,19 +41,16 @@ type Console interface {
 	EnsureSession(ctx context.Context, spec tmuxctl.SessionSpec) (bool, error)
 	SendText(ctx context.Context, session string, text string) error
 	Capture(ctx context.Context, session string, history int) (string, error)
-	SendKey(ctx context.Context, session string, key string) error
 }
 
 type Service struct {
-	ctx        context.Context
-	opts       Options
-	messenger  Messenger
-	console    Console
-	logger     *slog.Logger
-	pollEvery  time.Duration
-	promptWait time.Duration
-	startWait  time.Duration
-	history    int
+	ctx       context.Context
+	opts      Options
+	messenger Messenger
+	console   Console
+	logger    *slog.Logger
+	pollEvery time.Duration
+	startWait time.Duration
 
 	mu      sync.Mutex
 	runtime *groupRuntime
@@ -74,7 +66,10 @@ type groupRuntime struct {
 	pending      []string
 	sessionReady bool
 	lastText     string
-	lastBusy     bool
+	baseText     string
+	lastBody     string
+	sentBody     string
+	busy         bool
 	idleTicks    int
 	outputBuffer string
 }
@@ -87,15 +82,13 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		opts.SessionName = DefaultSessionName(opts.CWD)
 	}
 	return &Service{
-		ctx:        ctx,
-		opts:       opts,
-		messenger:  messenger,
-		console:    console,
-		logger:     logger,
-		pollEvery:  time.Second,
-		promptWait: 100 * time.Millisecond,
-		startWait:  4 * time.Second,
-		history:    2000,
+		ctx:       ctx,
+		opts:      opts,
+		messenger: messenger,
+		console:   console,
+		logger:    logger,
+		pollEvery: 300 * time.Millisecond,
+		startWait: 4 * time.Second,
 	}
 }
 
@@ -200,7 +193,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 				s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("[imcodex] Failed to start session: %v", err))
 				continue
 			}
-			if !rt.lastBusy && len(rt.pending) > 0 {
+			if !rt.busy && len(rt.pending) > 0 {
 				s.dispatchNext(rt)
 			}
 		case <-ticker.C:
@@ -212,7 +205,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 					s.logger.Warn("retry ensure session failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
 					continue
 				}
-				if !rt.lastBusy && len(rt.pending) > 0 {
+				if !rt.busy && len(rt.pending) > 0 {
 					s.dispatchNext(rt)
 				}
 				continue
@@ -228,23 +221,25 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	}
 
 	created, err := s.console.EnsureSession(s.ctx, tmuxctl.SessionSpec{
-		SessionName:                    rt.session,
-		CWD:                            rt.opts.CWD,
-		StartupWait:                    s.startWait,
-		AutoPressEnterOnTrustPrompt:    true,
-		AutoPressEnterOnApprovalPrompt: true,
+		SessionName:                 rt.session,
+		CWD:                         rt.opts.CWD,
+		StartupWait:                 s.startWait,
+		AutoPressEnterOnTrustPrompt: true,
 	})
 	if err != nil {
 		return err
 	}
 
-	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
+	snapshot, err := s.console.Capture(s.ctx, rt.session, 200)
 	if err != nil {
 		return err
 	}
 
 	rt.lastText = tmuxctl.NormalizeSnapshot(snapshot)
-	rt.lastBusy = tmuxctl.IsBusy(snapshot)
+	rt.baseText = ""
+	rt.lastBody = ""
+	rt.sentBody = ""
+	rt.busy = tmuxctl.IsBusy(snapshot)
 	rt.idleTicks = 0
 	rt.outputBuffer = ""
 	rt.sessionReady = true
@@ -267,108 +262,89 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("[imcodex] Failed to send to Codex: %v", err))
 		rt.pending = append([]string{text}, rt.pending...)
 		rt.sessionReady = false
-		rt.lastBusy = false
+		rt.busy = false
+		rt.baseText = ""
+		rt.lastBody = ""
+		rt.sentBody = ""
 		rt.idleTicks = 0
 		rt.lastText = ""
 		rt.outputBuffer = ""
 		return
 	}
 
-	rt.lastBusy = true
+	rt.busy = true
+	rt.baseText = rt.lastText
+	rt.lastBody = ""
+	rt.sentBody = ""
 	rt.idleTicks = 0
+	rt.outputBuffer = ""
 	s.sendBestEffort(rt.opts.GroupID, "[working] Codex is processing.")
 }
 
 func (s *Service) poll(rt *groupRuntime) {
-	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
+	snapshot, err := s.console.Capture(s.ctx, rt.session, 200)
 	if err != nil {
 		s.logger.Warn("capture tmux pane failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
 		rt.sessionReady = false
-		rt.lastBusy = false
+		rt.busy = false
+		rt.baseText = ""
+		rt.lastBody = ""
+		rt.sentBody = ""
 		rt.idleTicks = 0
 		rt.lastText = ""
 		rt.outputBuffer = ""
 		return
 	}
-	if tmuxctl.IsApprovalPrompt(snapshot) {
-		resolvedSnapshot, resolved, err := s.dismissApprovalPrompt(rt)
-		if err != nil {
-			s.logger.Warn("dismiss approval prompt failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
-			return
-		}
-		if !resolved {
-			s.logger.Warn("approval prompt still visible after auto-confirm attempts", "group_id", rt.opts.GroupID, "session", rt.session)
-			return
-		}
-		snapshot = resolvedSnapshot
-	}
 
 	currText := tmuxctl.NormalizeSnapshot(snapshot)
-	delta, reset := tmuxctl.DiffText(rt.lastText, currText)
+	currBody := tmuxctl.OutputBody(tmuxctl.SliceAfter(rt.baseText, currText))
+	delta, appendOnly := tmuxctl.AppendOnlyDelta(rt.lastBody, currBody)
 	busy := tmuxctl.IsBusy(snapshot)
 
-	if busy {
+	if delta != "" {
 		rt.idleTicks = 0
 	} else {
 		rt.idleTicks++
 	}
 
-	if delta != "" {
-		if reset {
-			rt.outputBuffer = delta
-		} else {
-			rt.outputBuffer += delta
+	if !appendOnly {
+		rt.outputBuffer = tmuxctl.SliceAfter(rt.sentBody, currBody)
+	} else if delta != "" {
+		if rt.outputBuffer != "" && !strings.HasSuffix(rt.outputBuffer, "\n") && !strings.HasPrefix(delta, "\n") {
+			rt.outputBuffer += "\n"
 		}
-	} else if reset {
-		rt.outputBuffer = ""
+		rt.outputBuffer += delta
 	}
+
 	if shouldFlush(rt.outputBuffer, busy, rt.idleTicks) {
 		s.sendChunked(rt.opts.GroupID, strings.Trim(rt.outputBuffer, "\n"))
+		rt.sentBody = currBody
 		rt.outputBuffer = ""
+		rt.idleTicks = 0
 	}
 
 	rt.lastText = currText
-	rt.lastBusy = busy
+	rt.lastBody = currBody
+	rt.busy = busy
 
 	if !busy && len(rt.pending) > 0 {
 		s.dispatchNext(rt)
 	}
 }
 
-func (s *Service) dismissApprovalPrompt(rt *groupRuntime) (string, bool, error) {
-	for _, keys := range approvalPromptAttempts {
-		for _, key := range keys {
-			if err := s.console.SendKey(s.ctx, rt.session, key); err != nil {
-				return "", false, err
-			}
-		}
-		if s.promptWait > 0 {
-			time.Sleep(s.promptWait)
-		}
-
-		snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
-		if err != nil {
-			return "", false, err
-		}
-		if !tmuxctl.IsApprovalPrompt(snapshot) {
-			return snapshot, true, nil
-		}
-	}
-
-	return "", false, nil
-}
-
 func shouldFlush(buffer string, busy bool, idleTicks int) bool {
-	if strings.TrimSpace(buffer) == "" {
+	buffer = strings.TrimSpace(buffer)
+	if buffer == "" {
 		return false
 	}
-	if !busy && idleTicks >= 2 {
+	runes := utf8.RuneCountInString(buffer)
+	if !busy && idleTicks >= 1 {
 		return true
 	}
-	if strings.Contains(buffer, "\n") {
+	if runes >= streamFlushRunes {
 		return true
 	}
-	return utf8.RuneCountInString(buffer) >= 80
+	return busy && idleTicks >= 2 && runes >= quietFlushRunes
 }
 
 func (s *Service) sendChunked(groupID string, text string) {

@@ -3,12 +3,9 @@ package tmuxctl
 import (
 	"regexp"
 	"strings"
-	"unicode/utf8"
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-
-const minReliableOverlapRunes = 4
 
 func NormalizeSnapshot(snapshot string) string {
 	snapshot = stripANSI(snapshot)
@@ -42,49 +39,135 @@ func NormalizeSnapshot(snapshot string) string {
 	return strings.Join(out, "\n")
 }
 
-func DiffText(prev string, curr string) (string, bool) {
+func DiffText(prev string, curr string) string {
 	if curr == prev {
-		return "", false
+		return ""
 	}
 	if prev == "" {
-		return curr, false
+		return curr
 	}
-	if strings.HasPrefix(curr, prev) {
-		return curr[len(prev):], false
+	if curr == "" {
+		return ""
 	}
-	if delta, ok := diffByOverlap(prev, curr); ok {
-		return delta, false
+
+	prevLines := strings.Split(prev, "\n")
+	currLines := strings.Split(curr, "\n")
+
+	maxOverlap := min(len(prevLines), len(currLines))
+	for n := maxOverlap; n > 0; n-- {
+		if equalLines(prevLines[len(prevLines)-n:], currLines[:n]) {
+			return strings.Join(currLines[n:], "\n")
+		}
 	}
-	return curr, true
+
+	if strings.HasSuffix(curr, prev) {
+		return ""
+	}
+	return curr
+}
+
+func SliceAfter(base string, curr string) string {
+	if curr == "" {
+		return ""
+	}
+	if base == "" || curr == base {
+		if curr == base {
+			return ""
+		}
+		return curr
+	}
+
+	baseLines := strings.Split(base, "\n")
+	currLines := strings.Split(curr, "\n")
+
+	maxOverlap := min(len(baseLines), len(currLines))
+	for n := maxOverlap; n > 0; n-- {
+		if equalLines(baseLines[len(baseLines)-n:], currLines[:n]) {
+			return strings.TrimLeft(strings.Join(currLines[n:], "\n"), "\n")
+		}
+	}
+
+	return curr
+}
+
+func OutputBody(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+
+	blocks := splitBlocks(strings.Split(text, "\n"))
+	start := trimLeadingPromptBlocks(blocks, 0)
+	if start >= len(blocks) {
+		return ""
+	}
+
+	end := trimTrailingPromptBlocks(blocks, len(blocks), start)
+	if end <= start {
+		return ""
+	}
+
+	kept := make([]string, 0, end-start)
+	afterPrompt := false
+	for _, block := range blocks[start:end] {
+		if isPromptBlock(block) {
+			afterPrompt = true
+			continue
+		}
+		if isIndentedBlock(block) {
+			if afterPrompt || len(kept) == 0 {
+				continue
+			}
+		}
+		kept = append(kept, strings.Join(block, "\n"))
+		afterPrompt = false
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n\n"))
+}
+
+func AppendOnlyDelta(prev string, curr string) (string, bool) {
+	if curr == prev {
+		return "", true
+	}
+	if prev == "" {
+		return curr, true
+	}
+	if curr == "" {
+		return "", true
+	}
+
+	prevLines := strings.Split(prev, "\n")
+	currLines := strings.Split(curr, "\n")
+
+	maxOverlap := min(len(prevLines), len(currLines))
+	for n := maxOverlap; n > 0; n-- {
+		if equalLines(prevLines[len(prevLines)-n:], currLines[:n]) {
+			return strings.Join(currLines[n:], "\n"), true
+		}
+	}
+
+	return "", false
 }
 
 func IsBusy(snapshot string) bool {
-	return strings.Contains(snapshot, "esc to interrupt")
+	lines := recentNonEmptyLines(snapshot, 3)
+	if len(lines) == 0 {
+		return false
+	}
+
+	last := strings.ToLower(lines[len(lines)-1])
+	if strings.Contains(last, "esc to interrupt") {
+		return true
+	}
+	if len(lines) >= 2 && isPromptCursorLine(last) {
+		return strings.Contains(strings.ToLower(lines[len(lines)-2]), "esc to interrupt")
+	}
+	return false
 }
 
 func IsTrustPrompt(snapshot string) bool {
 	return strings.Contains(snapshot, "Do you trust the contents of this directory?") ||
 		strings.Contains(snapshot, "Press enter to continue")
-}
-
-func IsApprovalPrompt(snapshot string) bool {
-	lower := strings.ToLower(snapshot)
-
-	switch {
-	case strings.Contains(lower, "allow") &&
-		strings.Contains(lower, "deny") &&
-		(strings.Contains(lower, "command") || strings.Contains(lower, "sandbox") || strings.Contains(lower, "approval")):
-		return true
-	case strings.Contains(lower, "approve") && strings.Contains(lower, "command"):
-		return true
-	case strings.Contains(lower, "approval") && strings.Contains(lower, "command"):
-		return true
-	case strings.Contains(lower, "run command") &&
-		(strings.Contains(lower, "allow") || strings.Contains(lower, "deny") || strings.Contains(lower, "approve")):
-		return true
-	default:
-		return false
-	}
 }
 
 func stripANSI(in string) string {
@@ -103,8 +186,7 @@ func shouldIgnoreLine(line string) bool {
 		strings.HasPrefix(line, "comes with higher risk of prompt injection."),
 		strings.HasPrefix(line, "1. Yes, continue"),
 		strings.HasPrefix(line, "2. No, quit"),
-		strings.HasPrefix(line, "Press enter to continue"),
-		line == "›":
+		strings.HasPrefix(line, "Press enter to continue"):
 		return true
 	case strings.Contains(line, "chatgpt.com/codex"),
 		strings.Contains(line, "community.openai.com"),
@@ -116,37 +198,114 @@ func shouldIgnoreLine(line string) bool {
 	}
 }
 
-func diffByOverlap(prev string, curr string) (string, bool) {
-	prevBoundaries := runeBoundaries(prev)
-	prevRunes := len(prevBoundaries) - 1
-	currRunes := utf8.RuneCountInString(curr)
-	maxRunes := min(prevRunes, currRunes)
+func recentNonEmptyLines(snapshot string, maxLines int) []string {
+	snapshot = stripANSI(snapshot)
+	lines := strings.Split(snapshot, "\n")
 
-	for size := maxRunes; size > 0; size-- {
-		start := prevBoundaries[prevRunes-size]
-		overlap := prev[start:]
-		if !isReliableOverlap(overlap, size) {
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			filtered = append(filtered, line)
+		}
+	}
+	if maxLines > 0 && len(filtered) > maxLines {
+		filtered = filtered[len(filtered)-maxLines:]
+	}
+	return filtered
+}
+
+func isPromptCursorLine(line string) bool {
+	line = strings.TrimSpace(line)
+	return line == "›" || line == ">"
+}
+
+func isPromptLine(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "›") || strings.HasPrefix(line, ">")
+}
+
+func isPromptBlock(lines []string) bool {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
 			continue
 		}
+		return isPromptLine(trimmed)
+	}
+	return false
+}
 
-		if pos := strings.Index(curr, overlap); pos >= 0 {
-			return curr[pos+len(overlap):], true
+func isIndentedBlock(lines []string) bool {
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		return line[0] == ' ' || line[0] == '\t'
+	}
+	return false
+}
+
+func trimLeadingPromptBlocks(blocks [][]string, start int) int {
+	skippedPrompt := false
+	for start < len(blocks) {
+		switch {
+		case isPromptBlock(blocks[start]):
+			start++
+			skippedPrompt = true
+		case skippedPrompt && isIndentedBlock(blocks[start]):
+			start++
+		default:
+			return start
 		}
 	}
-
-	return "", false
+	return start
 }
 
-func isReliableOverlap(overlap string, size int) bool {
-	return size >= minReliableOverlapRunes || strings.ContainsRune(overlap, '\n')
-}
-
-func runeBoundaries(text string) []int {
-	boundaries := make([]int, 0, utf8.RuneCountInString(text)+1)
-	for idx := range text {
-		boundaries = append(boundaries, idx)
+func trimTrailingPromptBlocks(blocks [][]string, end int, floor int) int {
+	for end > floor {
+		if !isPromptBlock(blocks[end-1]) {
+			return end
+		}
+		end--
 	}
-	return append(boundaries, len(text))
+	return end
+}
+
+func splitBlocks(lines []string) [][]string {
+	var blocks [][]string
+	var current []string
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		block := make([]string, len(current))
+		copy(block, current)
+		blocks = append(blocks, block)
+		current = nil
+	}
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		current = append(current, line)
+	}
+	flush()
+	return blocks
+}
+
+func equalLines(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func min(a int, b int) int {

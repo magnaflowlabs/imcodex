@@ -3,6 +3,7 @@ package tmuxctl
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -14,11 +15,10 @@ const (
 )
 
 type SessionSpec struct {
-	SessionName                    string
-	CWD                            string
-	StartupWait                    time.Duration
-	AutoPressEnterOnTrustPrompt    bool
-	AutoPressEnterOnApprovalPrompt bool
+	SessionName                 string
+	CWD                         string
+	StartupWait                 time.Duration
+	AutoPressEnterOnTrustPrompt bool
 }
 
 type Client struct {
@@ -36,10 +36,15 @@ func New() *Client {
 }
 
 func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, error) {
+	if err := validateWorkingDirectory(spec.CWD); err != nil {
+		return false, err
+	}
+
 	ok, err := c.hasSession(ctx, spec.SessionName)
 	if err != nil {
 		return false, err
 	}
+
 	created := false
 	if ok {
 		if err := c.ensureControlPane(ctx, spec); err != nil {
@@ -58,22 +63,19 @@ func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, err
 	}
 	time.Sleep(wait)
 
+	if ok, err := c.hasSession(ctx, spec.SessionName); err != nil {
+		return false, err
+	} else if !ok {
+		return false, fmt.Errorf("tmux session %s exited immediately; check cwd and codex startup", spec.SessionName)
+	}
+
 	if spec.AutoPressEnterOnTrustPrompt {
-		snapshot, err := c.Capture(ctx, spec.SessionName, 200)
+		snapshot, err := c.Capture(ctx, spec.SessionName, 80)
 		if err == nil && IsTrustPrompt(snapshot) {
 			if err := c.sendKey(ctx, spec.SessionName, "Enter"); err != nil {
 				return false, err
 			}
 			time.Sleep(wait / 2)
-		}
-	}
-	if spec.AutoPressEnterOnApprovalPrompt {
-		snapshot, err := c.Capture(ctx, spec.SessionName, 200)
-		if err == nil && IsApprovalPrompt(snapshot) {
-			if err := c.sendKey(ctx, spec.SessionName, "Enter"); err != nil {
-				return false, err
-			}
-			time.Sleep(wait / 4)
 		}
 	}
 
@@ -85,11 +87,12 @@ func (c *Client) SendText(ctx context.Context, session string, text string) erro
 	if err := c.run(ctx, "set-buffer", "-b", bufferName, "--", text); err != nil {
 		return fmt.Errorf("set tmux buffer: %w", err)
 	}
+
 	target, err := c.controlPaneTarget(ctx, session)
 	if err != nil {
 		return err
 	}
-	if err := c.run(ctx, "paste-buffer", "-d", "-b", bufferName, "-t", target); err != nil {
+	if err := c.run(ctx, "paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
 		return fmt.Errorf("paste tmux buffer: %w", err)
 	}
 	if c.enterWait > 0 {
@@ -103,12 +106,13 @@ func (c *Client) SendText(ctx context.Context, session string, text string) erro
 
 func (c *Client) Capture(ctx context.Context, session string, history int) (string, error) {
 	if history <= 0 {
-		history = 2000
+		history = 200
 	}
 	target, err := c.controlPaneTarget(ctx, session)
 	if err != nil {
 		return "", err
 	}
+
 	out, err := c.output(ctx, "capture-pane", "-pJ", "-S", fmt.Sprintf("-%d", history), "-t", target)
 	if err != nil {
 		return "", fmt.Errorf("capture tmux pane: %w", err)
@@ -116,8 +120,23 @@ func (c *Client) Capture(ctx context.Context, session string, history int) (stri
 	return out, nil
 }
 
-func (c *Client) SendKey(ctx context.Context, session string, key string) error {
-	return c.sendKey(ctx, session, key)
+func validateWorkingDirectory(cwd string) error {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return fmt.Errorf("working directory is empty")
+	}
+
+	info, err := os.Stat(cwd)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("working directory does not exist: %s", cwd)
+		}
+		return fmt.Errorf("stat working directory %s: %w", cwd, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("working directory is not a directory: %s", cwd)
+	}
+	return nil
 }
 
 func (c *Client) hasSession(ctx context.Context, session string) (bool, error) {
@@ -269,6 +288,7 @@ func (c *Client) findExistingControlPane(ctx context.Context, session string, al
 		id      string
 		command string
 	}
+
 	var panes []paneInfo
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		line = strings.TrimSpace(line)
