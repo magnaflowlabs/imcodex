@@ -182,6 +182,50 @@ esac
 	}
 }
 
+func TestClientInterruptUsesEscapeAndCtrlC(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	scriptPath := filepath.Join(dir, "tmux")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+case "$1" in
+  show-options)
+    printf '%%%%42\n'
+    ;;
+  display-message)
+    printf '%%%%42\n'
+    ;;
+esac
+`, shellQuote(logPath))
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	client := New()
+	client.bin = scriptPath
+
+	if err := client.Interrupt(context.Background(), "demo"); err != nil {
+		t.Fatalf("Interrupt() error = %v", err)
+	}
+	if err := client.ForceInterrupt(context.Background(), "demo"); err != nil {
+		t.Fatalf("ForceInterrupt() error = %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "send-keys -t %42 Escape") {
+		t.Fatalf("tmux log = %q, want Escape interrupt", logText)
+	}
+	if !strings.Contains(logText, "send-keys -t %42 C-c") {
+		t.Fatalf("tmux log = %q, want C-c force interrupt", logText)
+	}
+}
+
 func TestEnsureSessionRejectsMissingWorkingDirectory(t *testing.T) {
 	t.Parallel()
 

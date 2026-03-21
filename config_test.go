@@ -30,8 +30,31 @@ groups:
 	if cfg.larkBaseURL != "https://open.larksuite.com" {
 		t.Fatalf("larkBaseURL = %q, want %q", cfg.larkBaseURL, "https://open.larksuite.com")
 	}
+	if !cfg.interruptOnNewMessage {
+		t.Fatal("interruptOnNewMessage = false, want default true")
+	}
 	if len(cfg.groups) != 1 || cfg.groups[0].GroupID != "oc_1" || cfg.groups[0].CWD != "/srv/demo" {
 		t.Fatalf("groups = %#v, want one normalized group", cfg.groups)
+	}
+}
+
+func TestParseConfigReadsInterruptOnNewMessage(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+interrupt_on_new_message: false
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if cfg.interruptOnNewMessage {
+		t.Fatal("interruptOnNewMessage = true, want false")
 	}
 }
 

@@ -2,6 +2,7 @@
 lark_app_id: cli_xxx
 lark_app_secret: your_app_secret
 lark_base_url: https://open.larksuite.com
+interrupt_on_new_message: true
 groups:
   - group_id: oc_xxx_primary
     cwd: /srv/my-project

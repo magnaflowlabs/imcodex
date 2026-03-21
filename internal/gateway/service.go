@@ -42,9 +42,10 @@ type DownloadedResource struct {
 }
 
 type Options struct {
-	GroupID     string
-	CWD         string
-	SessionName string
+	GroupID               string
+	CWD                   string
+	SessionName           string
+	InterruptOnNewMessage bool
 }
 
 type Messenger interface {
@@ -55,6 +56,8 @@ type Console interface {
 	EnsureSession(ctx context.Context, spec tmuxctl.SessionSpec) (bool, error)
 	SendText(ctx context.Context, session string, text string) error
 	Capture(ctx context.Context, session string, history int) (string, error)
+	Interrupt(ctx context.Context, session string) error
+	ForceInterrupt(ctx context.Context, session string) error
 }
 
 type ResourceFetcher interface {
@@ -62,15 +65,16 @@ type ResourceFetcher interface {
 }
 
 type Service struct {
-	ctx       context.Context
-	opts      Options
-	messenger Messenger
-	console   Console
-	resources ResourceFetcher
-	logger    *slog.Logger
-	pollEvery time.Duration
-	startWait time.Duration
-	history   int
+	ctx                 context.Context
+	opts                Options
+	messenger           Messenger
+	console             Console
+	resources           ResourceFetcher
+	logger              *slog.Logger
+	pollEvery           time.Duration
+	startWait           time.Duration
+	history             int
+	interruptForceAfter time.Duration
 
 	mu      sync.Mutex
 	runtime *groupRuntime
@@ -80,18 +84,20 @@ type Service struct {
 }
 
 type groupRuntime struct {
-	opts         Options
-	session      string
-	queue        chan IncomingMessage
-	pending      []IncomingMessage
-	sessionReady bool
-	lastText     string
-	baseText     string
-	lastBusy     bool
-	idleTicks    int
-	outputBuffer string
-	busySince    time.Time
-	workingSent  bool
+	opts               Options
+	session            string
+	queue              chan IncomingMessage
+	pending            []IncomingMessage
+	sessionReady       bool
+	lastText           string
+	baseText           string
+	lastBusy           bool
+	idleTicks          int
+	outputBuffer       string
+	busySince          time.Time
+	workingSent        bool
+	interruptSentAt    time.Time
+	forceInterruptSent bool
 }
 
 func NewService(ctx context.Context, opts Options, messenger Messenger, console Console, resources ResourceFetcher, logger *slog.Logger) *Service {
@@ -102,15 +108,16 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		opts.SessionName = DefaultSessionName(opts.CWD)
 	}
 	return &Service{
-		ctx:       ctx,
-		opts:      opts,
-		messenger: messenger,
-		console:   console,
-		resources: resources,
-		logger:    logger,
-		pollEvery: 500 * time.Millisecond,
-		startWait: 4 * time.Second,
-		history:   2000,
+		ctx:                 ctx,
+		opts:                opts,
+		messenger:           messenger,
+		console:             console,
+		resources:           resources,
+		logger:              logger,
+		pollEvery:           500 * time.Millisecond,
+		startWait:           4 * time.Second,
+		history:             2000,
+		interruptForceAfter: time.Second,
 	}
 }
 
@@ -219,6 +226,9 @@ func (s *Service) runGroup(rt *groupRuntime) {
 			if !wasReady {
 				s.keepLatestPending(rt)
 			}
+			if s.opts.InterruptOnNewMessage && rt.lastBusy && len(rt.pending) > 0 {
+				s.requestInterrupt(rt)
+			}
 			if !rt.lastBusy && len(rt.pending) > 0 {
 				s.dispatchNext(rt)
 			}
@@ -269,6 +279,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	rt.outputBuffer = ""
 	rt.busySince = time.Time{}
 	rt.workingSent = false
+	rt.interruptSentAt = time.Time{}
+	rt.forceInterruptSent = false
 	rt.sessionReady = true
 
 	if created {
@@ -307,6 +319,8 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.outputBuffer = ""
 		rt.busySince = time.Time{}
 		rt.workingSent = false
+		rt.interruptSentAt = time.Time{}
+		rt.forceInterruptSent = false
 		return
 	}
 
@@ -316,6 +330,8 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 	rt.outputBuffer = ""
 	rt.busySince = time.Now()
 	rt.workingSent = false
+	rt.interruptSentAt = time.Time{}
+	rt.forceInterruptSent = false
 }
 
 func (s *Service) poll(rt *groupRuntime) {
@@ -341,6 +357,16 @@ func (s *Service) poll(rt *groupRuntime) {
 
 	if busy {
 		rt.idleTicks = 0
+		if s.opts.InterruptOnNewMessage && len(rt.pending) > 0 && rt.interruptSentAt.IsZero() {
+			s.requestInterrupt(rt)
+		}
+		if s.opts.InterruptOnNewMessage && !rt.interruptSentAt.IsZero() && !rt.forceInterruptSent && time.Since(rt.interruptSentAt) >= s.interruptForceAfter {
+			if err := s.console.ForceInterrupt(s.ctx, rt.session); err != nil {
+				s.logger.Warn("force interrupt codex failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
+			} else {
+				rt.forceInterruptSent = true
+			}
+		}
 		if !rt.workingSent && !rt.busySince.IsZero() && time.Since(rt.busySince) >= 3*time.Second {
 			s.sendBestEffort(rt.opts.GroupID, "[working] Codex is processing.")
 			rt.workingSent = true
@@ -365,6 +391,8 @@ func (s *Service) poll(rt *groupRuntime) {
 	if !busy {
 		rt.busySince = time.Time{}
 		rt.workingSent = false
+		rt.interruptSentAt = time.Time{}
+		rt.forceInterruptSent = false
 	}
 
 	if !busy && len(rt.pending) > 0 {
@@ -384,7 +412,23 @@ func (s *Service) enqueuePending(rt *groupRuntime, msg IncomingMessage) {
 		rt.pending = []IncomingMessage{msg}
 		return
 	}
+	if s.opts.InterruptOnNewMessage && rt.lastBusy {
+		rt.pending = []IncomingMessage{msg}
+		return
+	}
 	rt.pending = append(rt.pending, msg)
+}
+
+func (s *Service) requestInterrupt(rt *groupRuntime) {
+	if !rt.sessionReady || !rt.lastBusy || !rt.interruptSentAt.IsZero() {
+		return
+	}
+	if err := s.console.Interrupt(s.ctx, rt.session); err != nil {
+		s.logger.Warn("interrupt codex failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
+		return
+	}
+	rt.interruptSentAt = time.Now()
+	rt.forceInterruptSent = false
 }
 
 func (s *Service) keepLatestPending(rt *groupRuntime) {

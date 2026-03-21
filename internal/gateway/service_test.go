@@ -39,6 +39,7 @@ type fakeConsole struct {
 	captures      []string
 	captureErrors []error
 	sendTexts     []string
+	interrupts    []string
 	ensureErrors  []error
 	sendErrors    []error
 	ensureEntered chan struct{}
@@ -107,11 +108,33 @@ func (f *fakeConsole) Capture(context.Context, string, int) (string, error) {
 	return out, nil
 }
 
+func (f *fakeConsole) Interrupt(_ context.Context, session string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.interrupts = append(f.interrupts, "esc:"+session)
+	return nil
+}
+
+func (f *fakeConsole) ForceInterrupt(_ context.Context, session string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.interrupts = append(f.interrupts, "ctrl-c:"+session)
+	return nil
+}
+
 func (f *fakeConsole) allSendTexts() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]string, len(f.sendTexts))
 	copy(out, f.sendTexts)
+	return out
+}
+
+func (f *fakeConsole) allInterrupts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.interrupts))
+	copy(out, f.interrupts)
 	return out
 }
 
@@ -545,6 +568,60 @@ func TestServiceQueuesSecondMessageUntilBusyClears(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	if got := console.allSendTexts(); len(got) != 1 || got[0] != "first" {
 		t.Fatalf("sendTexts = %#v, want only first while busy", got)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := console.allSendTexts()
+		return len(got) >= 2 && got[1] == "second"
+	})
+}
+
+func TestServiceInterruptsCurrentRunOnNewMessageWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• Working (2s • esc to interrupt)",
+			"",
+			"",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{
+		GroupID:               "oc_1",
+		CWD:                   "/srv/demo",
+		SessionName:           "imcodex-demo",
+		InterruptOnNewMessage: true,
+	}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 20 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.interruptForceAfter = 500 * time.Millisecond
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_1", GroupID: "oc_1", Text: "first"}); err != nil {
+		t.Fatalf("HandleMessage(first) error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := console.allSendTexts()
+		return len(got) >= 1 && got[0] == "first"
+	})
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_2", GroupID: "oc_1", Text: "second"}); err != nil {
+		t.Fatalf("HandleMessage(second) error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		return len(console.allInterrupts()) >= 1
+	})
+	if got := console.allInterrupts()[0]; !strings.HasPrefix(got, "esc:") {
+		t.Fatalf("interrupts[0] = %q, want esc interrupt", got)
 	}
 
 	waitFor(t, 500*time.Millisecond, func() bool {

@@ -32,9 +32,10 @@ func main() {
 	groupIDs := make([]string, 0, len(cfg.groups))
 	for _, group := range cfg.groups {
 		options = append(options, gateway.Options{
-			GroupID:     group.GroupID,
-			CWD:         group.CWD,
-			SessionName: gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD),
+			GroupID:               group.GroupID,
+			CWD:                   group.CWD,
+			SessionName:           gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD),
+			InterruptOnNewMessage: cfg.interruptOnNewMessage,
 		})
 		groupIDs = append(groupIDs, group.GroupID)
 	}

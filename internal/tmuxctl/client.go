@@ -141,6 +141,14 @@ func (c *Client) Capture(ctx context.Context, session string, history int) (stri
 	return out, nil
 }
 
+func (c *Client) Interrupt(ctx context.Context, session string) error {
+	return c.sendKey(ctx, session, "Escape")
+}
+
+func (c *Client) ForceInterrupt(ctx context.Context, session string) error {
+	return c.sendKey(ctx, session, "C-c")
+}
+
 func validateWorkingDirectory(cwd string) error {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {

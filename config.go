@@ -20,11 +20,12 @@ const (
 )
 
 type config struct {
-	path          string
-	larkAppID     string
-	larkAppSecret string
-	larkBaseURL   string
-	groups        []groupConfig
+	path                  string
+	larkAppID             string
+	larkAppSecret         string
+	larkBaseURL           string
+	interruptOnNewMessage bool
+	groups                []groupConfig
 }
 
 type groupConfig struct {
@@ -33,10 +34,11 @@ type groupConfig struct {
 }
 
 type fileConfig struct {
-	LarkAppID     string        `yaml:"lark_app_id"`
-	LarkAppSecret string        `yaml:"lark_app_secret"`
-	LarkBaseURL   string        `yaml:"lark_base_url"`
-	Groups        []groupConfig `yaml:"groups"`
+	LarkAppID             string        `yaml:"lark_app_id"`
+	LarkAppSecret         string        `yaml:"lark_app_secret"`
+	LarkBaseURL           string        `yaml:"lark_base_url"`
+	InterruptOnNewMessage *bool         `yaml:"interrupt_on_new_message"`
+	Groups                []groupConfig `yaml:"groups"`
 }
 
 func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile func(string) ([]byte, error)) (config, error) {
@@ -66,11 +68,12 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 	}
 
 	cfg := config{
-		path:          path,
-		larkAppID:     firstNonEmpty(file.LarkAppID, envValue(lookupEnv, "LARK_APP_ID")),
-		larkAppSecret: firstNonEmpty(file.LarkAppSecret, envValue(lookupEnv, "LARK_APP_SECRET")),
-		larkBaseURL:   firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
-		groups:        normalizeGroups(file.Groups),
+		path:                  path,
+		larkAppID:             firstNonEmpty(file.LarkAppID, envValue(lookupEnv, "LARK_APP_ID")),
+		larkAppSecret:         firstNonEmpty(file.LarkAppSecret, envValue(lookupEnv, "LARK_APP_SECRET")),
+		larkBaseURL:           firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
+		interruptOnNewMessage: boolValue(file.InterruptOnNewMessage, true),
+		groups:                normalizeGroups(file.Groups),
 	}
 	if err := cfg.validate(); err != nil {
 		return config{}, err
@@ -168,4 +171,11 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func boolValue(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }

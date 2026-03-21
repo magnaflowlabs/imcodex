@@ -95,6 +95,7 @@ Minimal config:
 lark_app_id: cli_xxx
 lark_app_secret: your_app_secret
 lark_base_url: https://open.larksuite.com
+interrupt_on_new_message: true
 groups:
   - group_id: oc_xxx
     cwd: /srv/my-project
@@ -119,6 +120,7 @@ export LARK_BASE_URL=https://open.larksuite.com
 | `lark_app_id` | Bot app ID |
 | `lark_app_secret` | Bot app secret |
 | `lark_base_url` | API base URL for Lark or Feishu |
+| `interrupt_on_new_message` | If `true`, a new user message interrupts the current Codex run and keeps only the newest pending message |
 | `groups[].group_id` | Group mapped to Codex |
 | `groups[].cwd` | Working directory for that group |
 
@@ -162,11 +164,12 @@ After startup, send messages in the configured group as if you were talking dire
 | Slash commands | Forwarded as-is, for example `/new`, `/compact`, `/status` |
 | Multi-line messages | Preserved as one pasted input |
 | Group queue | Messages are serialized per group |
+| Interrupt on new message | Enabled by default; sends `Esc`, then `Ctrl-C` if Codex stays busy |
 | Startup backlog | While a session is starting or recovering, only the latest pending message is kept |
 | Multiple groups | Run independently |
 | Restarts | Existing `tmux` sessions are reused |
 | Single instance | One running `imcodex` process per config file |
-| Working notice | Sends `[working]` when a request is dispatched |
+| Working notice | Sends `[working]` only if a request stays busy for a few seconds |
 | Replies | Forwarded as new Codex output appears |
 
 ## Inspect the session
