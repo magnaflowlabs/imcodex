@@ -621,7 +621,7 @@ func (s *Service) sendBestEffort(groupID string, text string) {
 		return
 	}
 	if err := s.messenger.SendTextToChat(context.Background(), groupID, text); err != nil {
-		s.logger.Error("send lark message failed", "group_id", groupID, "err", err)
+		s.logger.Error("send chat message failed", "group_id", groupID, "err", err)
 	}
 }
 

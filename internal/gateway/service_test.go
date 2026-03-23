@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/magnaflowlabs/imcodex/internal/tmuxctl"
 )
@@ -778,6 +779,25 @@ func TestServiceClearsQueueAfterSendFailure(t *testing.T) {
 		got := console.allSendTexts()
 		return len(got) >= 2 && got[1] == "after failure"
 	})
+}
+
+func TestSplitByRunesRespectsTelegramSafeChunkSize(t *testing.T) {
+	t.Parallel()
+
+	if maxMessageRunes > 4096 {
+		t.Fatalf("maxMessageRunes = %d, want <= 4096 for Telegram sendMessage", maxMessageRunes)
+	}
+
+	text := strings.Repeat("a", maxMessageRunes*2+17)
+	chunks := splitByRunes(text, maxMessageRunes)
+	if len(chunks) != 3 {
+		t.Fatalf("len(chunks) = %d, want 3", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if got := utf8.RuneCountInString(chunk); got > maxMessageRunes {
+			t.Fatalf("chunk %d size = %d, want <= %d", i, got, maxMessageRunes)
+		}
+	}
 }
 
 func nonStatusMessages(texts []string) []string {
