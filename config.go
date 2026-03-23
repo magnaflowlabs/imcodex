@@ -17,13 +17,18 @@ import (
 const (
 	defaultConfigPath     = "imcodex.yaml"
 	defaultUserConfigName = ".imcodex.yaml"
+	defaultPlatform       = "lark"
+	defaultTelegramAPIURL = "https://api.telegram.org"
 )
 
 type config struct {
 	path                  string
+	platform              string
 	larkAppID             string
 	larkAppSecret         string
 	larkBaseURL           string
+	telegramBotToken      string
+	telegramBaseURL       string
 	interruptOnNewMessage bool
 	groups                []groupConfig
 }
@@ -34,9 +39,12 @@ type groupConfig struct {
 }
 
 type fileConfig struct {
+	Platform              string        `yaml:"platform"`
 	LarkAppID             string        `yaml:"lark_app_id"`
 	LarkAppSecret         string        `yaml:"lark_app_secret"`
 	LarkBaseURL           string        `yaml:"lark_base_url"`
+	TelegramBotToken      string        `yaml:"telegram_bot_token"`
+	TelegramBaseURL       string        `yaml:"telegram_base_url"`
 	InterruptOnNewMessage *bool         `yaml:"interrupt_on_new_message"`
 	Groups                []groupConfig `yaml:"groups"`
 }
@@ -69,9 +77,12 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 
 	cfg := config{
 		path:                  path,
+		platform:              firstNonEmpty(file.Platform, envValue(lookupEnv, "IMCODEX_PLATFORM"), defaultPlatform),
 		larkAppID:             firstNonEmpty(file.LarkAppID, envValue(lookupEnv, "LARK_APP_ID")),
 		larkAppSecret:         firstNonEmpty(file.LarkAppSecret, envValue(lookupEnv, "LARK_APP_SECRET")),
 		larkBaseURL:           firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
+		telegramBotToken:      firstNonEmpty(file.TelegramBotToken, envValue(lookupEnv, "TELEGRAM_BOT_TOKEN")),
+		telegramBaseURL:       firstNonEmpty(file.TelegramBaseURL, envValue(lookupEnv, "TELEGRAM_BASE_URL"), defaultTelegramAPIURL),
 		interruptOnNewMessage: boolValue(file.InterruptOnNewMessage, true),
 		groups:                normalizeGroups(file.Groups),
 	}
@@ -123,14 +134,30 @@ func normalizeGroups(groups []groupConfig) []groupConfig {
 }
 
 func (c config) validate() error {
-	if c.larkAppID == "" {
-		return errors.New("required: lark_app_id or LARK_APP_ID")
+	c.platform = strings.ToLower(strings.TrimSpace(c.platform))
+	if c.platform == "" {
+		c.platform = defaultPlatform
 	}
-	if c.larkAppSecret == "" {
-		return errors.New("required: lark_app_secret or LARK_APP_SECRET")
-	}
-	if c.larkBaseURL == "" {
-		return errors.New("required: lark_base_url or LARK_BASE_URL")
+	switch c.platform {
+	case "lark":
+		if c.larkAppID == "" {
+			return errors.New("required: lark_app_id or LARK_APP_ID")
+		}
+		if c.larkAppSecret == "" {
+			return errors.New("required: lark_app_secret or LARK_APP_SECRET")
+		}
+		if c.larkBaseURL == "" {
+			return errors.New("required: lark_base_url or LARK_BASE_URL")
+		}
+	case "telegram":
+		if c.telegramBotToken == "" {
+			return errors.New("required: telegram_bot_token or TELEGRAM_BOT_TOKEN")
+		}
+		if c.telegramBaseURL == "" {
+			return errors.New("required: telegram_base_url or TELEGRAM_BASE_URL")
+		}
+	default:
+		return fmt.Errorf("unsupported platform: %s", c.platform)
 	}
 	if len(c.groups) == 0 {
 		return errors.New("required: groups")

@@ -10,6 +10,7 @@ import (
 
 	"github.com/magnaflowlabs/imcodex/internal/gateway"
 	"github.com/magnaflowlabs/imcodex/internal/lark"
+	"github.com/magnaflowlabs/imcodex/internal/telegram"
 	"github.com/magnaflowlabs/imcodex/internal/tmuxctl"
 )
 
@@ -29,7 +30,6 @@ func main() {
 	defer cancel()
 
 	options := make([]gateway.Options, 0, len(cfg.groups))
-	groupIDs := make([]string, 0, len(cfg.groups))
 	for _, group := range cfg.groups {
 		options = append(options, gateway.Options{
 			GroupID:               group.GroupID,
@@ -37,41 +37,74 @@ func main() {
 			SessionName:           gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD),
 			InterruptOnNewMessage: cfg.interruptOnNewMessage,
 		})
-		groupIDs = append(groupIDs, group.GroupID)
 	}
 
-	larkClient := lark.NewClient(cfg.larkAppID, cfg.larkAppSecret, cfg.larkBaseURL)
-	router, err := gateway.NewRouter(ctx, options, larkClient, tmuxctl.New(), larkClient, nil)
+	console := tmuxctl.New()
+	var (
+		startFuncs []func(context.Context) error
+		baseURL    string
+	)
+
+	router, err := buildRouter(ctx, cfg, options, console, &startFuncs, &baseURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	receiver := lark.NewReceiver(cfg.larkAppID, cfg.larkAppSecret, cfg.larkBaseURL, router)
-	poller := lark.NewPoller(larkClient, groupIDs, router, nil)
-	log.Printf("imcodex started: config=%s groups=%d base=%s", cfg.path, router.GroupCount(), cfg.larkBaseURL)
-
-	go func() {
-		runReceiverLoop(ctx, receiver)
-	}()
-	go func() {
-		if err := poller.Start(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("WARN lark poller stopped: %v", err)
-		}
-	}()
+	log.Printf("imcodex started: config=%s platform=%s groups=%d base=%s", cfg.path, cfg.platform, router.GroupCount(), baseURL)
+	for _, start := range startFuncs {
+		go func(start func(context.Context) error) {
+			if err := start(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("WARN bridge loop stopped: %v", err)
+			}
+		}(start)
+	}
 
 	<-ctx.Done()
 }
 
-func runReceiverLoop(ctx context.Context, receiver *lark.Receiver) {
+func buildRouter(ctx context.Context, cfg config, options []gateway.Options, console gateway.Console, startFuncs *[]func(context.Context) error, baseURL *string) (*gateway.Router, error) {
+	switch cfg.platform {
+	case "telegram":
+		tgClient := telegram.NewClient(cfg.telegramBotToken, cfg.telegramBaseURL)
+		router, err := gateway.NewRouter(ctx, options, tgClient, console, tgClient, nil)
+		if err != nil {
+			return nil, err
+		}
+		receiver := telegram.NewReceiver(tgClient, router, nil)
+		*baseURL = cfg.telegramBaseURL
+		*startFuncs = append(*startFuncs, receiver.Start)
+		return router, nil
+	default:
+		groupIDs := make([]string, 0, len(cfg.groups))
+		for _, group := range cfg.groups {
+			groupIDs = append(groupIDs, group.GroupID)
+		}
+		larkClient := lark.NewClient(cfg.larkAppID, cfg.larkAppSecret, cfg.larkBaseURL)
+		router, err := gateway.NewRouter(ctx, options, larkClient, console, larkClient, nil)
+		if err != nil {
+			return nil, err
+		}
+		receiver := lark.NewReceiver(cfg.larkAppID, cfg.larkAppSecret, cfg.larkBaseURL, router)
+		poller := lark.NewPoller(larkClient, groupIDs, router, nil)
+		*baseURL = cfg.larkBaseURL
+		*startFuncs = append(*startFuncs,
+			func(ctx context.Context) error { return runLarkReceiverLoop(ctx, receiver) },
+			poller.Start,
+		)
+		return router, nil
+	}
+}
+
+func runLarkReceiverLoop(ctx context.Context, receiver *lark.Receiver) error {
 	for {
 		err := receiver.Start(ctx)
 		if err == nil || ctx.Err() != nil {
-			return
+			return nil
 		}
 		log.Printf("WARN lark long connection failed: %v", err)
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-time.After(3 * time.Second):
 		}
 	}

@@ -33,6 +33,9 @@ groups:
 	if !cfg.interruptOnNewMessage {
 		t.Fatal("interruptOnNewMessage = false, want default true")
 	}
+	if cfg.platform != "lark" {
+		t.Fatalf("platform = %q, want lark", cfg.platform)
+	}
 	if len(cfg.groups) != 1 || cfg.groups[0].GroupID != "oc_1" || cfg.groups[0].CWD != "/srv/demo" {
 		t.Fatalf("groups = %#v, want one normalized group", cfg.groups)
 	}
@@ -55,6 +58,60 @@ groups:
 	}
 	if cfg.interruptOnNewMessage {
 		t.Fatal("interruptOnNewMessage = true, want false")
+	}
+}
+
+func TestParseConfigReadsTelegramMode(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig(nil, nil, readConfig(`
+platform: telegram
+telegram_bot_token: 123456:abc
+groups:
+  - group_id: -100123
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if cfg.platform != "telegram" {
+		t.Fatalf("platform = %q, want telegram", cfg.platform)
+	}
+	if cfg.telegramBotToken != "123456:abc" {
+		t.Fatalf("telegramBotToken = %q, want token", cfg.telegramBotToken)
+	}
+	if cfg.telegramBaseURL != "https://api.telegram.org" {
+		t.Fatalf("telegramBaseURL = %q, want default Telegram API URL", cfg.telegramBaseURL)
+	}
+}
+
+func TestParseConfigRejectsTelegramWithoutToken(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, nil, readConfig(`
+platform: telegram
+groups:
+  - group_id: -100123
+    cwd: /srv/demo
+`))
+	if err == nil || !strings.Contains(err.Error(), "telegram_bot_token") {
+		t.Fatalf("parseConfig() error = %v, want telegram token error", err)
+	}
+}
+
+func TestParseConfigRejectsUnsupportedPlatform(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, nil, readConfig(`
+platform: discord
+lark_app_id: cli_yaml
+lark_app_secret: secret_yaml
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported platform") {
+		t.Fatalf("parseConfig() error = %v, want unsupported platform error", err)
 	}
 }
 
