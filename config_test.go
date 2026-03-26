@@ -41,6 +41,33 @@ groups:
 	}
 }
 
+func TestParseConfigReadsJobsAndResolvesPromptFile(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+        prompt_file: ./prompts/hourly_review.md
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	if len(cfg.groups) != 1 || len(cfg.groups[0].Jobs) != 1 {
+		t.Fatalf("groups = %#v, want one group with one job", cfg.groups)
+	}
+	if got, want := cfg.groups[0].Jobs[0].PromptFile, "/srv/imcodex/prompts/hourly_review.md"; got != want {
+		t.Fatalf("prompt_file = %q, want %q", got, want)
+	}
+}
+
 func TestParseConfigReadsInterruptOnNewMessage(t *testing.T) {
 	t.Parallel()
 
@@ -213,6 +240,48 @@ groups:
 `))
 	if err == nil || !strings.Contains(err.Error(), "duplicate group_id") {
 		t.Fatalf("parseConfig() error = %v, want duplicate group_id", err)
+	}
+}
+
+func TestParseConfigRejectsDuplicateJobNameInGroup(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/a
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+        prompt_file: /srv/a/prompts/hourly.md
+      - name: hourly_review
+        schedule: "5 * * * *"
+        prompt_file: /srv/a/prompts/hourly2.md
+`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate job name") {
+		t.Fatalf("parseConfig() error = %v, want duplicate job name error", err)
+	}
+}
+
+func TestParseConfigRejectsJobWithoutPromptFile(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/a
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+`))
+	if err == nil || !strings.Contains(err.Error(), "prompt_file") {
+		t.Fatalf("parseConfig() error = %v, want prompt_file error", err)
 	}
 }
 

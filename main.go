@@ -10,6 +10,7 @@ import (
 
 	"github.com/magnaflowlabs/imcodex/internal/gateway"
 	"github.com/magnaflowlabs/imcodex/internal/lark"
+	"github.com/magnaflowlabs/imcodex/internal/scheduler"
 	"github.com/magnaflowlabs/imcodex/internal/telegram"
 	"github.com/magnaflowlabs/imcodex/internal/tmuxctl"
 )
@@ -50,7 +51,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Printf("imcodex started: config=%s platform=%s groups=%d base=%s", cfg.path, cfg.platform, router.GroupCount(), baseURL)
+	log.Printf(
+		"imcodex started: config=%s platform=%s groups=%d jobs=%d base=%s",
+		cfg.path,
+		cfg.platform,
+		router.GroupCount(),
+		countJobs(cfg.groups),
+		baseURL,
+	)
 	for _, start := range startFuncs {
 		go func(start func(context.Context) error) {
 			if err := start(ctx); err != nil && ctx.Err() == nil {
@@ -70,6 +78,11 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 		if err != nil {
 			return nil, err
 		}
+		if runner, err := buildScheduler(cfg.groups, tgClient, console); err != nil {
+			return nil, err
+		} else if runner != nil {
+			*startFuncs = append(*startFuncs, runner.Start)
+		}
 		receiver := telegram.NewReceiver(tgClient, router, nil)
 		*baseURL = cfg.telegramBaseURL
 		*startFuncs = append(*startFuncs, receiver.Start)
@@ -84,6 +97,11 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 		if err != nil {
 			return nil, err
 		}
+		if runner, err := buildScheduler(cfg.groups, larkClient, console); err != nil {
+			return nil, err
+		} else if runner != nil {
+			*startFuncs = append(*startFuncs, runner.Start)
+		}
 		receiver := lark.NewReceiver(cfg.larkAppID, cfg.larkAppSecret, cfg.larkBaseURL, router)
 		poller := lark.NewPoller(larkClient, groupIDs, router, nil)
 		*baseURL = cfg.larkBaseURL
@@ -93,6 +111,39 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 		)
 		return router, nil
 	}
+}
+
+func buildScheduler(groups []groupConfig, messenger gateway.Messenger, console gateway.Console) (*scheduler.Runner, error) {
+	jobs := buildScheduledJobs(groups)
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	return scheduler.New(jobs, messenger, console, nil)
+}
+
+func buildScheduledJobs(groups []groupConfig) []scheduler.Job {
+	jobs := make([]scheduler.Job, 0)
+	for _, group := range groups {
+		for _, job := range group.Jobs {
+			jobs = append(jobs, scheduler.Job{
+				GroupID:     group.GroupID,
+				CWD:         group.CWD,
+				Name:        job.Name,
+				Schedule:    job.Schedule,
+				PromptFile:  job.PromptFile,
+				SessionName: scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name),
+			})
+		}
+	}
+	return jobs
+}
+
+func countJobs(groups []groupConfig) int {
+	total := 0
+	for _, group := range groups {
+		total += len(group.Jobs)
+	}
+	return total
 }
 
 func runLarkReceiverLoop(ctx context.Context, receiver *lark.Receiver) error {

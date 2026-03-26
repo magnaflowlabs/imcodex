@@ -1,48 +1,29 @@
 # imcodex
 
-`imcodex` bridges a Lark, Feishu, or Telegram group chat to a long-running Codex CLI session on your machine.
+`imcodex` bridges a Lark, Feishu, or Telegram group chat to long-lived Codex CLI sessions running inside `tmux`.
 
-Each configured group maps to one working directory and one persistent `tmux`-hosted Codex session.
-
-## Overview
+## Model
 
 | Item | Behavior |
 | --- | --- |
-| Chat model | One group = one project directory = one Codex session |
-| Session host | `tmux` |
-| IM backends | Lark / Feishu via outbound WebSocket, Telegram via long polling |
-| Public webhook | Not required |
-| Inbound port | Not required |
-| Multi-line user input | Sent to Codex as bracketed paste |
-| Very long text input | Loaded into `tmux` from a temp buffer file |
-| Output forwarded to chat | Codex reply text, flushed when the run pauses or completes |
-| Output hidden from chat | Codex terminal chrome and input box |
-
-## Safety
-
-`imcodex` starts Codex with these defaults:
-
-| Setting | Value |
-| --- | --- |
-| Approval policy | `never` |
-| Sandbox mode | `danger-full-access` |
-| Directory trust prompt | Auto-confirmed |
-
-Use it only on a machine you control and trust.
+| Main chat session | One group = one `cwd` = one persistent Codex session |
+| Scheduled jobs | Declared in YAML; each job gets its own persistent Codex session |
+| Job visibility | Jobs post final results or failures back to the same group |
+| Context isolation | The main chat session and job sessions do not share Codex context |
+| Reconfiguration | Edit YAML and prompt `.md` files, then restart `imcodex` |
 
 ## Requirements
 
 | Requirement | Notes |
 | --- | --- |
 | `tmux` | Required at runtime |
-| Codex CLI | `codex login` must already be complete |
-| Go 1.24+ | Required only if you build locally |
-| Lark/Feishu bot app or Telegram bot | Pick one backend |
-| Group ID / chat ID | Depends on backend |
+| Codex CLI | Required; `codex login` must already be completed |
+| Go 1.24+ | Needed only for local builds |
+| Lark / Feishu bot or Telegram bot | Pick one backend |
 
 ## Install
 
-### macOS
+macOS:
 
 ```bash
 brew install tmux
@@ -50,7 +31,7 @@ npm install -g @openai/codex
 codex login
 ```
 
-### Ubuntu 24.04
+Ubuntu 24.04:
 
 ```bash
 sudo apt update
@@ -59,31 +40,22 @@ sudo npm install -g @openai/codex
 codex login
 ```
 
-### Verify the toolchain
+Verify:
 
 ```bash
-go version
 tmux -V
 codex --version
 ```
 
-## Lark or Feishu setup
+## Group IDs
 
-1. Create or open your bot app.
-2. Enable bot capability.
-3. Subscribe to `im.message.receive_v1`.
-4. Add the bot to the target group.
-5. Copy the group `group_id` from the group settings UI.
+### Lark / Feishu
 
-## Telegram setup
+Copy the group ID directly from the group settings UI.
 
-1. Open `@BotFather`.
-2. Create a bot with `/newbot`.
-3. Save the bot token.
-4. Open `/setprivacy` in `@BotFather` and disable privacy mode for the bot.
-5. Add the bot to the target group or supergroup.
-6. Get the Telegram `chat_id` for that group.
-7. Make sure the machine running `imcodex` can reach `https://api.telegram.org`, or provide `HTTPS_PROXY` / a self-hosted Bot API endpoint through `telegram_base_url`.
+### Telegram
+
+Add the bot to the target group, then obtain that group's `chat_id`. Supergroups usually look like `-1001234567890`.
 
 ## Configuration
 
@@ -92,13 +64,21 @@ If `-config` is not provided, `imcodex` looks for config files in this order:
 1. `./imcodex.yaml`
 2. `~/.imcodex.yaml`
 
-Create a config file from the example:
+See [config.example.yaml](config.example.yaml).
 
-```bash
-cp config.example.yaml imcodex.yaml
-```
+Key fields:
 
-Lark / Feishu config:
+| Field | Meaning |
+| --- | --- |
+| `platform` | `lark` or `telegram` |
+| `interrupt_on_new_message` | If `true`, a new group message interrupts the current main-session run and keeps only the newest pending message |
+| `groups[].group_id` | Group ID or Telegram chat ID |
+| `groups[].cwd` | Working directory mapped to that group |
+| `groups[].jobs[].name` | Job name shown in job result posts |
+| `groups[].jobs[].schedule` | Standard 5-field cron expression |
+| `groups[].jobs[].prompt_file` | Markdown prompt file; relative paths are resolved from the config file directory |
+
+Lark / Feishu:
 
 ```yaml
 platform: lark
@@ -106,30 +86,40 @@ lark_app_id: cli_xxx
 lark_app_secret: your_app_secret
 lark_base_url: https://open.larksuite.com
 interrupt_on_new_message: true
+
 groups:
   - group_id: oc_xxx
     cwd: /srv/my-project
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+        prompt_file: ./prompts/hourly_review.md
 ```
 
-For Feishu China, set:
+For Feishu China tenants:
 
 ```yaml
 lark_base_url: https://open.feishu.cn
 ```
 
-Telegram config:
+Telegram:
 
 ```yaml
 platform: telegram
 telegram_bot_token: 123456:ABCDEF
 telegram_base_url: https://api.telegram.org
 interrupt_on_new_message: true
+
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+        prompt_file: ./prompts/hourly_review.md
 ```
 
-Optional environment variables:
+Supported environment-variable overrides:
 
 ```bash
 export IMCODEX_PLATFORM=lark
@@ -138,32 +128,27 @@ export LARK_APP_SECRET=your_app_secret
 export LARK_BASE_URL=https://open.larksuite.com
 export TELEGRAM_BOT_TOKEN=123456:ABCDEF
 export TELEGRAM_BASE_URL=https://api.telegram.org
-export HTTPS_PROXY=http://127.0.0.1:7003
 ```
 
-| Field | Meaning |
-| --- | --- |
-| `platform` | `lark` or `telegram` |
-| `lark_app_id` | Bot app ID |
-| `lark_app_secret` | Bot app secret |
-| `lark_base_url` | API base URL for Lark or Feishu |
-| `telegram_bot_token` | Telegram bot token from `@BotFather` |
-| `telegram_base_url` | Telegram Bot API base URL |
-| `interrupt_on_new_message` | If `true`, a new user message interrupts the current Codex run and keeps only the newest pending message |
-| `groups[].group_id` | Lark group ID or Telegram chat ID mapped to Codex |
-| `groups[].cwd` | Working directory for that group |
+## Scheduled Jobs
 
-Add more entries under `groups:` to connect more projects.
+| Item | Behavior |
+| --- | --- |
+| Session model | Each job owns one long-lived `tmux` / Codex session |
+| Relationship to main chat | Fully isolated; no shared Codex context |
+| Trigger behavior | At the scheduled time, `imcodex` reads `prompt_file` and sends it to that job session |
+| Group output | Only the final visible output or a failure notice is posted back |
+| Overlap policy | If a job is still running when the next trigger arrives, the new trigger is skipped |
 
 ## Build
 
-| Command | Output |
+| Command | Result |
 | --- | --- |
-| `make` | Local binary in `build/` |
-| `make linux` | Linux `amd64` binary in `build/`, packed with `upx` |
-| `make test` | Unit tests, including `-race` |
+| `make` | Builds the local binary under `build/` |
+| `make linux` | Builds the Linux `amd64` binary under `build/` and packs it with `upx` |
+| `make test` | Runs unit tests plus `-race` |
 
-Examples:
+Run:
 
 ```bash
 make
@@ -179,68 +164,50 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex started: config=imcodex.yaml platform=lark groups=1 base=https://open.larksuite.com
+imcodex started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
-## Runtime behavior
+## Runtime Behavior
 
-After startup, send messages in the configured group as if you were talking directly to Codex.
-
-| Behavior | Details |
+| Scenario | Behavior |
 | --- | --- |
-| Plain text | Forwarded to Codex |
-| Images and file-like attachments | Saved under `cwd/.imcodex/inbox/` and forwarded as a short prompt with the saved path |
-| Slash commands | Forwarded as-is, for example `/new`, `/compact`, `/status` |
-| Multi-line messages | Preserved as one pasted input |
-| Group queue | One active run per group |
-| Interrupt on new message | Enabled by default; sends `Esc`, then `Ctrl-C` if Codex stays busy |
-| Startup backlog | While a session is starting or recovering, only the latest pending message is kept |
-| Multiple groups | Run independently |
-| Restarts | Existing `tmux` sessions are reused |
-| Single instance | One running `imcodex` process per config file |
-| Working notice | Sends `[working]` only if a request stays busy for a few seconds |
-| Replies | Sent after Codex pauses or finishes, chunked when needed |
-| Telegram message size | Replies are split before Telegram's `sendMessage` limit |
+| Plain text | Forwarded to the group's main Codex session |
+| Multi-line input | Preserved as one pasted input |
+| Slash commands | Forwarded as-is, for example `/new` or `/compact` |
+| Images / files | Downloaded into `cwd/.imcodex/inbox/`, then forwarded as a short text prompt with the saved path |
+| New message while main session is busy | Interrupts the current run and keeps only the newest pending message by default |
+| Job execution | Posts only the final result, not live incremental output |
+| Restart | Reuses existing `tmux` sessions when they still exist |
 
-## Inspect the session
+## Inspect Sessions
 
 ```bash
 tmux ls
 tmux attach -r -t <session-name>
 ```
 
+Session names are generated automatically for both main chat sessions and job sessions.
+
 ## Troubleshooting
 
-### Messages are not forwarded
+### Main chat messages are not reaching Codex
 
 Check:
 
 1. The bot is in the correct group.
-2. `group_id` matches the real group or Telegram `chat_id`.
-3. Each configured `cwd` exists on the machine running `imcodex`.
-4. `codex login` has already completed.
-5. `tmux` and `codex` are in `PATH`.
-6. The startup log shows the config file you expected.
-7. For Telegram, privacy mode is disabled in `@BotFather`.
-8. For Telegram, the host running `imcodex` can reach `api.telegram.org`, or `HTTPS_PROXY` / `telegram_base_url` is configured correctly.
+2. `group_id` / `chat_id` matches the real target group.
+3. `cwd` exists on the host running `imcodex`.
+4. `tmux` and `codex` are in `PATH`.
+5. `codex login` has already completed.
+6. For Telegram, privacy mode is disabled if you expect normal group messages to reach the bot.
 
-If Telegram privacy mode is still enabled, group messages may only reach the bot when they are commands, mentions, or replies to the bot.
+### Scheduled jobs are not firing
 
-### Messages are duplicated
+Check:
 
-Run only one `imcodex` process for the same config file. A second process with the same groups will forward the same Codex output again.
-
-### Images and files are not inspected
-
-`imcodex` downloads supported attachments into `cwd/.imcodex/inbox/` and sends Codex a short text prompt with the saved path. Lark / Feishu supports `image` plus file-like attachments (`file`, `audio`, `video`, `media`). Telegram supports photos plus file-like attachments such as documents, audio, video, and voice notes.
-
-### The session disappeared after a restart
-
-If the `tmux` session no longer exists, `imcodex` recreates it when the next group message arrives.
-
-### I want more than one project
-
-Add more entries under `groups:`. Each entry is one group and one working directory.
+1. `schedule` is a valid 5-field cron expression.
+2. `prompt_file` exists and is not empty.
+3. The job's `tmux` session is not still stuck in an earlier run.
 
 ## License
 
