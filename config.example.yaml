@@ -1,4 +1,4 @@
-# platform defaults to lark when omitted.
+# Platform defaults to lark when omitted.
 platform: lark
 
 # Lark / Feishu
@@ -12,8 +12,14 @@ lark_base_url: https://open.larksuite.com
 # telegram_base_url: https://api.telegram.org
 
 interrupt_on_new_message: true
+
 groups:
   - group_id: oc_xxx_primary
     cwd: /srv/my-project
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+        prompt_file: ./prompts/hourly_review.md
+
   - group_id: oc_xxx_secondary
     cwd: /srv/another-project

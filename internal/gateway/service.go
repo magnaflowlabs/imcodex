@@ -20,6 +20,7 @@ const (
 	maxMessageRunes      = 3000
 	queueSize            = 64
 	recentMessageIDLimit = 256
+	maxAttachmentRetries = 1
 )
 
 type IncomingMessage struct {
@@ -83,11 +84,19 @@ type Service struct {
 	recentMessageSet map[string]struct{}
 }
 
+type activeRequest struct {
+	messageID      string
+	input          string
+	retryCount     int
+	hasAttachments bool
+}
+
 type groupRuntime struct {
 	opts               Options
 	session            string
 	queue              chan IncomingMessage
 	pending            []IncomingMessage
+	active             *activeRequest
 	sessionReady       bool
 	lastText           string
 	baseText           string
@@ -306,7 +315,11 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		return
 	}
 
-	if err := s.console.SendText(s.ctx, rt.session, text); err != nil {
+	if err := s.dispatchPrepared(rt, &activeRequest{
+		messageID:      msg.MessageID,
+		input:          text,
+		hasAttachments: len(msg.Attachments) > 0,
+	}); err != nil {
 		s.logger.Error("send text to codex failed", "group_id", rt.opts.GroupID, "err", err)
 		s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("[imcodex] Failed to send to Codex: %v", err))
 		rt.pending = nil
@@ -321,9 +334,18 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.workingSent = false
 		rt.interruptSentAt = time.Time{}
 		rt.forceInterruptSent = false
+		rt.active = nil
 		return
 	}
+}
 
+func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
+	if req == nil {
+		return errors.New("active request is nil")
+	}
+	if err := s.console.SendText(s.ctx, rt.session, req.input); err != nil {
+		return err
+	}
 	rt.baseText = rt.lastText
 	rt.lastBusy = true
 	rt.idleTicks = 0
@@ -332,6 +354,8 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 	rt.workingSent = false
 	rt.interruptSentAt = time.Time{}
 	rt.forceInterruptSent = false
+	rt.active = req
+	return nil
 }
 
 func (s *Service) poll(rt *groupRuntime) {
@@ -346,6 +370,7 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.outputBuffer = ""
 		rt.busySince = time.Time{}
 		rt.workingSent = false
+		rt.active = nil
 		return
 	}
 
@@ -381,7 +406,10 @@ func (s *Service) poll(rt *groupRuntime) {
 	if reset {
 		rt.outputBuffer = ""
 	}
-	if shouldFlush(rt.outputBuffer, busy, rt.idleTicks) {
+	retryCurrent := !busy && len(rt.pending) == 0 && shouldRetryAttachmentRequest(rt.active, currText)
+	if retryCurrent {
+		rt.outputBuffer = ""
+	} else if shouldFlush(rt.outputBuffer, busy, rt.idleTicks) {
 		s.sendChunked(rt.opts.GroupID, strings.Trim(rt.outputBuffer, "\n"))
 		rt.outputBuffer = ""
 	}
@@ -393,6 +421,30 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.workingSent = false
 		rt.interruptSentAt = time.Time{}
 		rt.forceInterruptSent = false
+		if !retryCurrent {
+			rt.active = nil
+		}
+	}
+
+	if retryCurrent {
+		if err := s.retryActiveRequest(rt); err != nil {
+			s.logger.Error("retry attachment request failed", "group_id", rt.opts.GroupID, "session", rt.session, "message_id", rt.activeMessageID(), "err", err)
+			s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("[imcodex] Failed to send to Codex: %v", err))
+			rt.pending = nil
+			s.dropQueued(rt)
+			rt.sessionReady = false
+			rt.baseText = ""
+			rt.lastBusy = false
+			rt.idleTicks = 0
+			rt.lastText = ""
+			rt.outputBuffer = ""
+			rt.busySince = time.Time{}
+			rt.workingSent = false
+			rt.interruptSentAt = time.Time{}
+			rt.forceInterruptSent = false
+			rt.active = nil
+		}
+		return
 	}
 
 	if !busy && len(rt.pending) > 0 {
@@ -400,11 +452,40 @@ func (s *Service) poll(rt *groupRuntime) {
 	}
 }
 
+func (s *Service) retryActiveRequest(rt *groupRuntime) error {
+	if rt.active == nil {
+		return errors.New("active request is nil")
+	}
+	retry := *rt.active
+	retry.retryCount++
+	s.logger.Warn("codex stream disconnected before completion; retrying attachment request", "group_id", rt.opts.GroupID, "session", rt.session, "message_id", retry.messageID, "retry_count", retry.retryCount)
+	return s.dispatchPrepared(rt, &retry)
+}
+
 func shouldFlush(buffer string, busy bool, idleTicks int) bool {
 	if strings.TrimSpace(buffer) == "" {
 		return false
 	}
 	return !busy && idleTicks >= 2
+}
+
+func shouldRetryAttachmentRequest(req *activeRequest, output string) bool {
+	if req == nil || !req.hasAttachments || req.retryCount >= maxAttachmentRetries {
+		return false
+	}
+	return looksLikeTransientStreamDisconnect(output)
+}
+
+func looksLikeTransientStreamDisconnect(output string) bool {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return false
+	}
+	lower := strings.ToLower(output)
+	if !strings.Contains(lower, "stream disconnected before completion") && !strings.Contains(lower, "before response.completed") {
+		return false
+	}
+	return utf8.RuneCountInString(output) <= 240
 }
 
 func (s *Service) enqueuePending(rt *groupRuntime, msg IncomingMessage) {
@@ -429,6 +510,13 @@ func (s *Service) requestInterrupt(rt *groupRuntime) {
 	}
 	rt.interruptSentAt = time.Now()
 	rt.forceInterruptSent = false
+}
+
+func (rt *groupRuntime) activeMessageID() string {
+	if rt == nil || rt.active == nil {
+		return ""
+	}
+	return rt.active.messageID
 }
 
 func (s *Service) keepLatestPending(rt *groupRuntime) {

@@ -34,8 +34,15 @@ type config struct {
 }
 
 type groupConfig struct {
-	GroupID string `yaml:"group_id"`
-	CWD     string `yaml:"cwd"`
+	GroupID string      `yaml:"group_id"`
+	CWD     string      `yaml:"cwd"`
+	Jobs    []jobConfig `yaml:"jobs"`
+}
+
+type jobConfig struct {
+	Name       string `yaml:"name"`
+	Schedule   string `yaml:"schedule"`
+	PromptFile string `yaml:"prompt_file"`
 }
 
 type fileConfig struct {
@@ -84,7 +91,7 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 		telegramBotToken:      firstNonEmpty(file.TelegramBotToken, envValue(lookupEnv, "TELEGRAM_BOT_TOKEN")),
 		telegramBaseURL:       firstNonEmpty(file.TelegramBaseURL, envValue(lookupEnv, "TELEGRAM_BASE_URL"), defaultTelegramAPIURL),
 		interruptOnNewMessage: boolValue(file.InterruptOnNewMessage, true),
-		groups:                normalizeGroups(file.Groups),
+		groups:                normalizeGroups(file.Groups, path),
 	}
 	if err := cfg.validate(); err != nil {
 		return config{}, err
@@ -122,12 +129,21 @@ func loadConfigFile(path string, lookupEnv func(string) (string, bool), readFile
 	return "", nil, fmt.Errorf("config not found; tried %s", strings.Join(missing, ", "))
 }
 
-func normalizeGroups(groups []groupConfig) []groupConfig {
+func normalizeGroups(groups []groupConfig, configPath string) []groupConfig {
 	out := make([]groupConfig, 0, len(groups))
 	for _, group := range groups {
+		jobs := make([]jobConfig, 0, len(group.Jobs))
+		for _, job := range group.Jobs {
+			jobs = append(jobs, jobConfig{
+				Name:       strings.TrimSpace(job.Name),
+				Schedule:   strings.TrimSpace(job.Schedule),
+				PromptFile: resolveConfigRelativePath(configPath, job.PromptFile),
+			})
+		}
 		out = append(out, groupConfig{
 			GroupID: strings.TrimSpace(group.GroupID),
 			CWD:     strings.TrimSpace(group.CWD),
+			Jobs:    jobs,
 		})
 	}
 	return out
@@ -175,6 +191,22 @@ func (c config) validate() error {
 			return fmt.Errorf("duplicate group_id: %s", group.GroupID)
 		}
 		seen[group.GroupID] = struct{}{}
+
+		jobSeen := make(map[string]struct{}, len(group.Jobs))
+		for j, job := range group.Jobs {
+			switch {
+			case job.Name == "":
+				return fmt.Errorf("groups[%d].jobs[%d].name is required", i, j)
+			case job.Schedule == "":
+				return fmt.Errorf("groups[%d].jobs[%d].schedule is required", i, j)
+			case job.PromptFile == "":
+				return fmt.Errorf("groups[%d].jobs[%d].prompt_file is required", i, j)
+			}
+			if _, ok := jobSeen[job.Name]; ok {
+				return fmt.Errorf("duplicate job name in group %s: %s", group.GroupID, job.Name)
+			}
+			jobSeen[job.Name] = struct{}{}
+		}
 	}
 	return nil
 }
@@ -205,4 +237,17 @@ func boolValue(value *bool, fallback bool) bool {
 		return fallback
 	}
 	return *value
+}
+
+func resolveConfigRelativePath(configPath string, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || filepath.IsAbs(value) {
+		return value
+	}
+
+	configDir := filepath.Dir(configPath)
+	if absDir, err := filepath.Abs(configDir); err == nil {
+		configDir = absDir
+	}
+	return filepath.Clean(filepath.Join(configDir, value))
 }

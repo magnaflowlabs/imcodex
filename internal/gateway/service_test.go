@@ -446,6 +446,70 @@ func TestServiceImageWithoutFilenameUsesContentTypeExtension(t *testing.T) {
 	}
 }
 
+func TestServiceRetriesAttachmentRunAfterTransientDisconnect(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cwd := t.TempDir()
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"stream disconnected before completion: stream closed before response.completed",
+			"stream disconnected before completion: stream closed before response.completed\n\n• Working (1s • esc to interrupt)",
+			"stream disconnected before completion: stream closed before response.completed\n\n• Attachment summary ready",
+			"stream disconnected before completion: stream closed before response.completed\n\n• Attachment summary ready",
+		},
+	}
+	messenger := &fakeMessenger{}
+	resources := &fakeResourceFetcher{
+		resources: map[string]DownloadedResource{
+			"om_retry|file|file_retry": {
+				Data:        []byte("report-body"),
+				FileName:    "report.txt",
+				ContentType: "text/plain",
+			},
+		},
+	}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: cwd, SessionName: "imcodex-demo"}, messenger, console, resources, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_retry",
+		GroupID:   "oc_1",
+		Attachments: []IncomingAttachment{
+			{ResourceType: "file", ResourceKey: "file_retry", FileName: "report.txt"},
+		},
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		return len(nonStatusMessages(messenger.all())) >= 1
+	})
+
+	sendTexts := console.allSendTexts()
+	if len(sendTexts) != 2 {
+		t.Fatalf("len(sendTexts) = %d, want 2 with one retry", len(sendTexts))
+	}
+	if sendTexts[0] != sendTexts[1] {
+		t.Fatalf("sendTexts = %#v, want retry to resend the same attachment prompt", sendTexts)
+	}
+
+	outputs := nonStatusMessages(messenger.all())
+	if got, want := outputs[0], "• Attachment summary ready"; got != want {
+		t.Fatalf("outputs[0] = %q, want %q", got, want)
+	}
+	if strings.Contains(strings.Join(outputs, "\n"), "stream disconnected before completion") {
+		t.Fatalf("outputs = %#v, want transient disconnect hidden after retry", outputs)
+	}
+}
+
 func TestServiceStreamsScrolledSnapshotWithoutRepeatingPrefix(t *testing.T) {
 	t.Parallel()
 
