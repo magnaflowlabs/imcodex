@@ -89,12 +89,36 @@ func NewClient(botToken string, baseURL string) *Client {
 }
 
 func (c *Client) SendTextToChat(ctx context.Context, groupID string, text string) error {
-	var result struct{}
-	return c.call(ctx, "sendMessage", map[string]any{
+	_, err := c.SendTextToChatWithID(ctx, groupID, text)
+	return err
+}
+
+func (c *Client) SendTextToChatWithID(ctx context.Context, groupID string, text string) (gateway.SentMessage, error) {
+	var result struct {
+		MessageID int64 `json:"message_id"`
+	}
+	err := c.call(ctx, "sendMessage", map[string]any{
 		"chat_id":                  strings.TrimSpace(groupID),
 		"text":                     text,
 		"disable_web_page_preview": true,
 	}, &result)
+	if err != nil {
+		return gateway.SentMessage{}, err
+	}
+	return gateway.SentMessage{MessageID: strconv.FormatInt(result.MessageID, 10)}, nil
+}
+
+func (c *Client) EditTextInChat(ctx context.Context, groupID string, messageID string, text string) error {
+	id, err := strconv.ParseInt(strings.TrimSpace(messageID), 10, 64)
+	if err != nil {
+		return fmt.Errorf("telegram message id is invalid: %w", err)
+	}
+	return c.call(ctx, "editMessageText", map[string]any{
+		"chat_id":                  strings.TrimSpace(groupID),
+		"message_id":               id,
+		"text":                     text,
+		"disable_web_page_preview": true,
+	}, nil)
 }
 
 func (c *Client) DownloadMessageResource(ctx context.Context, _ string, _ string, resourceKey string) (gateway.DownloadedResource, error) {

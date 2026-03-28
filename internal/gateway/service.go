@@ -17,10 +17,14 @@ import (
 )
 
 const (
-	maxMessageRunes      = 3000
-	queueSize            = 64
-	recentMessageIDLimit = 256
-	maxAttachmentRetries = 1
+	maxMessageRunes       = 3000
+	queueSize             = 64
+	recentMessageIDLimit  = 256
+	maxAttachmentRetries  = 1
+	defaultFlushIdleTicks = 8
+	defaultWorkingAfter   = time.Second
+	defaultEditRolloverAt = 2800
+	workingStatusText     = "[working] Codex is processing."
 )
 
 type IncomingMessage struct {
@@ -53,6 +57,15 @@ type Messenger interface {
 	SendTextToChat(ctx context.Context, groupID string, text string) error
 }
 
+type SentMessage struct {
+	MessageID string
+}
+
+type EditableMessenger interface {
+	SendTextToChatWithID(ctx context.Context, groupID string, text string) (SentMessage, error)
+	EditTextInChat(ctx context.Context, groupID string, messageID string, text string) error
+}
+
 type Console interface {
 	EnsureSession(ctx context.Context, spec tmuxctl.SessionSpec) (bool, error)
 	SendText(ctx context.Context, session string, text string) error
@@ -75,6 +88,9 @@ type Service struct {
 	pollEvery           time.Duration
 	startWait           time.Duration
 	history             int
+	flushIdleTicks      int
+	workingAfter        time.Duration
+	editRolloverAt      int
 	interruptForceAfter time.Duration
 
 	mu      sync.Mutex
@@ -103,10 +119,17 @@ type groupRuntime struct {
 	lastBusy           bool
 	idleTicks          int
 	outputBuffer       string
+	outputText         string
+	outputMessages     []trackedMessage
 	busySince          time.Time
 	workingSent        bool
 	interruptSentAt    time.Time
 	forceInterruptSent bool
+}
+
+type trackedMessage struct {
+	messageID string
+	text      string
 }
 
 func NewService(ctx context.Context, opts Options, messenger Messenger, console Console, resources ResourceFetcher, logger *slog.Logger) *Service {
@@ -126,6 +149,9 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		pollEvery:           500 * time.Millisecond,
 		startWait:           4 * time.Second,
 		history:             2000,
+		flushIdleTicks:      defaultFlushIdleTicks,
+		workingAfter:        defaultWorkingAfter,
+		editRolloverAt:      defaultEditRolloverAt,
 		interruptForceAfter: time.Second,
 	}
 }
@@ -239,6 +265,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 				s.requestInterrupt(rt)
 			}
 			if !rt.lastBusy && len(rt.pending) > 0 {
+				s.flushOutputBuffer(rt)
 				s.dispatchNext(rt)
 			}
 		case <-ticker.C:
@@ -252,6 +279,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 				}
 				s.keepLatestPending(rt)
 				if !rt.lastBusy && len(rt.pending) > 0 {
+					s.flushOutputBuffer(rt)
 					s.dispatchNext(rt)
 				}
 				continue
@@ -286,6 +314,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	rt.lastBusy = tmuxctl.IsBusy(snapshot)
 	rt.idleTicks = 0
 	rt.outputBuffer = ""
+	rt.outputText = ""
+	rt.outputMessages = nil
 	rt.busySince = time.Time{}
 	rt.workingSent = false
 	rt.interruptSentAt = time.Time{}
@@ -330,6 +360,8 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.idleTicks = 0
 		rt.lastText = ""
 		rt.outputBuffer = ""
+		rt.outputText = ""
+		rt.outputMessages = nil
 		rt.busySince = time.Time{}
 		rt.workingSent = false
 		rt.interruptSentAt = time.Time{}
@@ -343,6 +375,7 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	if req == nil {
 		return errors.New("active request is nil")
 	}
+	s.prepareOutputForDispatch(rt)
 	if err := s.console.SendText(s.ctx, rt.session, req.input); err != nil {
 		return err
 	}
@@ -350,6 +383,7 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	rt.lastBusy = true
 	rt.idleTicks = 0
 	rt.outputBuffer = ""
+	rt.outputText = ""
 	rt.busySince = time.Now()
 	rt.workingSent = false
 	rt.interruptSentAt = time.Time{}
@@ -368,6 +402,8 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.idleTicks = 0
 		rt.lastText = ""
 		rt.outputBuffer = ""
+		rt.outputText = ""
+		rt.outputMessages = nil
 		rt.busySince = time.Time{}
 		rt.workingSent = false
 		rt.active = nil
@@ -392,8 +428,8 @@ func (s *Service) poll(rt *groupRuntime) {
 				rt.forceInterruptSent = true
 			}
 		}
-		if !rt.workingSent && !rt.busySince.IsZero() && time.Since(rt.busySince) >= 3*time.Second {
-			s.sendBestEffort(rt.opts.GroupID, "[working] Codex is processing.")
+		if !rt.workingSent && !rt.busySince.IsZero() && time.Since(rt.busySince) >= s.workingAfter {
+			s.sendWorkingStatus(rt)
 			rt.workingSent = true
 		}
 	} else {
@@ -409,9 +445,8 @@ func (s *Service) poll(rt *groupRuntime) {
 	retryCurrent := !busy && len(rt.pending) == 0 && shouldRetryAttachmentRequest(rt.active, currText)
 	if retryCurrent {
 		rt.outputBuffer = ""
-	} else if shouldFlush(rt.outputBuffer, busy, rt.idleTicks) {
-		s.sendChunked(rt.opts.GroupID, strings.Trim(rt.outputBuffer, "\n"))
-		rt.outputBuffer = ""
+	} else if shouldFlush(rt.outputBuffer, busy, rt.idleTicks, s.flushIdleTicks) {
+		s.flushOutputBuffer(rt)
 	}
 
 	rt.lastText = currFullText
@@ -438,6 +473,8 @@ func (s *Service) poll(rt *groupRuntime) {
 			rt.idleTicks = 0
 			rt.lastText = ""
 			rt.outputBuffer = ""
+			rt.outputText = ""
+			rt.outputMessages = nil
 			rt.busySince = time.Time{}
 			rt.workingSent = false
 			rt.interruptSentAt = time.Time{}
@@ -448,6 +485,7 @@ func (s *Service) poll(rt *groupRuntime) {
 	}
 
 	if !busy && len(rt.pending) > 0 {
+		s.flushOutputBuffer(rt)
 		s.dispatchNext(rt)
 	}
 }
@@ -462,11 +500,14 @@ func (s *Service) retryActiveRequest(rt *groupRuntime) error {
 	return s.dispatchPrepared(rt, &retry)
 }
 
-func shouldFlush(buffer string, busy bool, idleTicks int) bool {
+func shouldFlush(buffer string, busy bool, idleTicks int, flushIdleTicks int) bool {
 	if strings.TrimSpace(buffer) == "" {
 		return false
 	}
-	return !busy && idleTicks >= 2
+	if flushIdleTicks <= 0 {
+		flushIdleTicks = 1
+	}
+	return !busy && idleTicks >= flushIdleTicks
 }
 
 func shouldRetryAttachmentRequest(req *activeRequest, output string) bool {
@@ -702,6 +743,166 @@ func (s *Service) sendChunked(groupID string, text string) {
 	for _, chunk := range splitByRunes(text, maxMessageRunes) {
 		s.sendBestEffort(groupID, chunk)
 	}
+}
+
+func (s *Service) editableMessenger() EditableMessenger {
+	editable, _ := s.messenger.(EditableMessenger)
+	return editable
+}
+
+func (s *Service) prepareOutputForDispatch(rt *groupRuntime) {
+	if rt == nil {
+		return
+	}
+	rt.outputBuffer = ""
+	rt.outputText = ""
+	if len(rt.outputMessages) == 1 && rt.outputMessages[0].text == workingStatusText {
+		return
+	}
+	rt.outputMessages = nil
+}
+
+func (s *Service) sendWorkingStatus(rt *groupRuntime) {
+	if rt == nil {
+		return
+	}
+	editable := s.editableMessenger()
+	if editable == nil {
+		s.sendBestEffort(rt.opts.GroupID, workingStatusText)
+		return
+	}
+	if len(rt.outputMessages) > 0 {
+		return
+	}
+	msg, err := editable.SendTextToChatWithID(context.Background(), rt.opts.GroupID, workingStatusText)
+	if err != nil {
+		s.logger.Error("send working message failed", "group_id", rt.opts.GroupID, "err", err)
+		s.sendBestEffort(rt.opts.GroupID, workingStatusText)
+		return
+	}
+	rt.outputMessages = []trackedMessage{{
+		messageID: msg.MessageID,
+		text:      workingStatusText,
+	}}
+}
+
+func (s *Service) flushOutputBuffer(rt *groupRuntime) {
+	if rt == nil {
+		return
+	}
+	raw := rt.outputBuffer
+	rt.outputBuffer = ""
+	if strings.TrimSpace(raw) == "" {
+		return
+	}
+	editable := s.editableMessenger()
+	if editable == nil {
+		text := strings.Trim(raw, "\n")
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		s.sendChunked(rt.opts.GroupID, text)
+		return
+	}
+	candidateText := rt.outputText + raw
+	desiredText := strings.Trim(candidateText, "\n")
+	if strings.TrimSpace(desiredText) == "" {
+		rt.outputText = candidateText
+		return
+	}
+	if err := s.syncEditableOutput(rt, editable, desiredText); err != nil {
+		rt.outputBuffer = raw + rt.outputBuffer
+		s.logger.Error("sync editable output failed", "group_id", rt.opts.GroupID, "err", err)
+		return
+	}
+	rt.outputText = candidateText
+}
+
+func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenger, desiredText string) error {
+	segments := splitForEditMessages(desiredText, s.editRolloverAt, maxMessageRunes)
+	if len(segments) == 0 {
+		return nil
+	}
+
+	next := make([]trackedMessage, len(rt.outputMessages))
+	copy(next, rt.outputMessages)
+	if len(next) > len(segments) {
+		next = next[:len(segments)]
+	}
+
+	for i, segment := range segments {
+		if i < len(next) {
+			if next[i].text == segment {
+				continue
+			}
+			if err := editable.EditTextInChat(context.Background(), rt.opts.GroupID, next[i].messageID, segment); err != nil {
+				rt.outputMessages = next
+				return err
+			}
+			next[i].text = segment
+			continue
+		}
+
+		msg, err := editable.SendTextToChatWithID(context.Background(), rt.opts.GroupID, segment)
+		if err != nil {
+			rt.outputMessages = next
+			return err
+		}
+		next = append(next, trackedMessage{
+			messageID: msg.MessageID,
+			text:      segment,
+		})
+	}
+
+	rt.outputMessages = next
+	return nil
+}
+
+func splitForEditMessages(text string, softLimit int, hardLimit int) []string {
+	text = strings.Trim(text, "\n")
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if hardLimit <= 0 {
+		hardLimit = maxMessageRunes
+	}
+	if softLimit <= 0 || softLimit > hardLimit {
+		softLimit = hardLimit
+	}
+
+	runes := []rune(text)
+	var segments []string
+	for len(runes) > 0 {
+		limit := softLimit
+		if len(runes) <= limit {
+			segments = append(segments, string(runes))
+			break
+		}
+		end := findSplitIndex(runes, limit)
+		if end <= 0 || end > hardLimit {
+			end = limit
+		}
+		segments = append(segments, string(runes[:end]))
+		runes = runes[end:]
+	}
+	return segments
+}
+
+func findSplitIndex(runes []rune, limit int) int {
+	if limit <= 0 || len(runes) <= limit {
+		return len(runes)
+	}
+	for i := limit - 1; i >= 0; i-- {
+		if runes[i] == '\n' {
+			return i + 1
+		}
+	}
+	for i := limit - 1; i >= 0; i-- {
+		if runes[i] == ' ' || runes[i] == '\t' {
+			return i + 1
+		}
+	}
+	return limit
 }
 
 func (s *Service) sendBestEffort(groupID string, text string) {

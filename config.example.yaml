@@ -13,6 +13,8 @@ lark_base_url: https://open.larksuite.com
 
 interrupt_on_new_message: true
 
+# Each job must set exactly one of `prompt_file` or `command`.
+# `artifacts_dir` and `summary_file` apply only to `command` jobs.
 groups:
   - group_id: oc_xxx_primary
     cwd: /srv/my-project
@@ -20,6 +22,14 @@ groups:
       - name: hourly_review
         schedule: "1 * * * *"
         prompt_file: ./prompts/hourly_review.md
+      - name: hl_stack_cycle
+        schedule: "6 * * * *"
+        # Optional:
+        # artifacts_dir: ./.imcodex/jobs/hl_stack_cycle
+        # summary_file: ./.imcodex/jobs/hl_stack_cycle/latest-summary.md
+        command: |
+          ./ops/run_dry_cycle.sh &&
+          printf 'hl_stack dry cycle completed.\nartifacts: %s\n' "$IMCODEX_JOB_ARTIFACTS_DIR" > "$IMCODEX_JOB_SUMMARY_FILE"
 
   - group_id: oc_xxx_secondary
     cwd: /srv/another-project

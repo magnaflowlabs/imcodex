@@ -126,12 +126,15 @@ func buildScheduledJobs(groups []groupConfig) []scheduler.Job {
 	for _, group := range groups {
 		for _, job := range group.Jobs {
 			jobs = append(jobs, scheduler.Job{
-				GroupID:     group.GroupID,
-				CWD:         group.CWD,
-				Name:        job.Name,
-				Schedule:    job.Schedule,
-				PromptFile:  job.PromptFile,
-				SessionName: scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name),
+				GroupID:      group.GroupID,
+				CWD:          group.CWD,
+				Name:         job.Name,
+				Schedule:     job.Schedule,
+				PromptFile:   job.PromptFile,
+				Command:      job.Command,
+				ArtifactsDir: job.ArtifactsDir,
+				SummaryFile:  job.SummaryFile,
+				SessionName:  scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name),
 			})
 		}
 	}

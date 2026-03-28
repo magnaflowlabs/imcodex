@@ -2,8 +2,10 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -161,6 +163,102 @@ func TestJobRunnerPostsNoOutputNotice(t *testing.T) {
 	outputs := messenger.all()
 	if len(outputs) != 1 || outputs[0] != "[job:silent_job] completed with no visible output." {
 		t.Fatalf("outputs = %#v, want no-output notice", outputs)
+	}
+}
+
+func TestCommandJobPostsSummaryAndWritesLogs(t *testing.T) {
+	t.Parallel()
+
+	cwd := t.TempDir()
+	messenger := &fakeMessenger{}
+	job := &jobRunner{
+		job: Job{
+			GroupID:  "oc_1",
+			CWD:      cwd,
+			Name:     "hl_stack_cycle",
+			Schedule: "1 * * * *",
+			Command: strings.Join([]string{
+				"printf '[1/2] doctor\\n'",
+				"printf 'cycle ok\\n'",
+				"printf 'cycle summary\\nartifacts: %s\\n' \"$IMCODEX_JOB_ARTIFACTS_DIR\" > \"$IMCODEX_JOB_SUMMARY_FILE\"",
+			}, "; "),
+		},
+		messenger: messenger,
+		logger:    slog.Default(),
+	}
+
+	if err := job.run(context.Background()); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+
+	outputs := messenger.all()
+	if len(outputs) != 1 {
+		t.Fatalf("len(outputs) = %d, want 1", len(outputs))
+	}
+	if !strings.Contains(outputs[0], "[job:hl_stack_cycle] completed.") {
+		t.Fatalf("outputs[0] = %q, want completed prefix", outputs[0])
+	}
+	if !strings.Contains(outputs[0], "cycle summary") {
+		t.Fatalf("outputs[0] = %q, want summary content", outputs[0])
+	}
+
+	root := filepath.Join(cwd, ".imcodex", "jobs", "hl-stack-cycle")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir(%s) error = %v", root, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1 run dir", len(entries))
+	}
+	runDir := filepath.Join(root, entries[0].Name())
+	for _, name := range []string{"stdout.log", "stderr.log", "combined.log", "summary.md"} {
+		if _, err := os.Stat(filepath.Join(runDir, name)); err != nil {
+			t.Fatalf("Stat(%s) error = %v", name, err)
+		}
+	}
+}
+
+func TestCommandJobPostsFailureWithStageHint(t *testing.T) {
+	t.Parallel()
+
+	cwd := t.TempDir()
+	messenger := &fakeMessenger{}
+	job := &jobRunner{
+		job: Job{
+			GroupID:  "oc_1",
+			CWD:      cwd,
+			Name:     "hl_stack_cycle",
+			Schedule: "1 * * * *",
+			Command: strings.Join([]string{
+				"printf '[1/3] doctor\\n'",
+				"printf '[2/3] cache record-once\\n'",
+				"printf 'cache failed\\n' >&2",
+				"exit 7",
+			}, "; "),
+		},
+		messenger: messenger,
+		logger:    slog.Default(),
+	}
+
+	err := job.run(context.Background())
+	if err == nil {
+		t.Fatal("run() error = nil, want failure")
+	}
+
+	var reported reportedError
+	if !errors.As(err, &reported) {
+		t.Fatalf("run() error = %T, want reportedError", err)
+	}
+
+	outputs := messenger.all()
+	if len(outputs) != 1 {
+		t.Fatalf("len(outputs) = %d, want 1", len(outputs))
+	}
+	if !strings.Contains(outputs[0], "failed during [2/3] cache record-once") {
+		t.Fatalf("outputs[0] = %q, want stage hint", outputs[0])
+	}
+	if !strings.Contains(outputs[0], "cache failed") {
+		t.Fatalf("outputs[0] = %q, want stderr tail", outputs[0])
 	}
 }
 

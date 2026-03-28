@@ -7,7 +7,7 @@
 | Item | Behavior |
 | --- | --- |
 | Main chat session | One group = one `cwd` = one persistent Codex session |
-| Scheduled jobs | Declared in YAML; each job gets its own persistent Codex session |
+| Scheduled jobs | Declared in YAML; each job is either a `prompt_file` Codex session or a `command` shell run |
 | Job visibility | Jobs post final results or failures back to the same group |
 | Context isolation | The main chat session and job sessions do not share Codex context |
 | Reconfiguration | Edit YAML and prompt `.md` files, then restart `imcodex` |
@@ -76,7 +76,12 @@ Key fields:
 | `groups[].cwd` | Working directory mapped to that group |
 | `groups[].jobs[].name` | Job name shown in job result posts |
 | `groups[].jobs[].schedule` | Standard 5-field cron expression |
-| `groups[].jobs[].prompt_file` | Markdown prompt file; relative paths are resolved from the config file directory |
+| `groups[].jobs[].prompt_file` | Markdown prompt file for Codex-driven jobs; relative paths are resolved from the config file directory |
+| `groups[].jobs[].command` | Shell command for deterministic CLI jobs such as `hl_stack`; runs in `cwd` |
+| `groups[].jobs[].artifacts_dir` | Optional base dir for per-run logs; relative paths are resolved from `cwd` |
+| `groups[].jobs[].summary_file` | Optional file whose content is posted on success; relative paths are resolved from `cwd` |
+
+Each job must set exactly one of `prompt_file` or `command`.
 
 Lark / Feishu:
 
@@ -94,6 +99,11 @@ groups:
       - name: hourly_review
         schedule: "1 * * * *"
         prompt_file: ./prompts/hourly_review.md
+      - name: hl_stack_cycle
+        schedule: "6 * * * *"
+        command: |
+          ./ops/run_dry_cycle.sh &&
+          printf 'hl_stack dry cycle completed.\nartifacts: %s\n' "$IMCODEX_JOB_ARTIFACTS_DIR" > "$IMCODEX_JOB_SUMMARY_FILE"
 ```
 
 For Feishu China tenants:
@@ -117,6 +127,11 @@ groups:
       - name: hourly_review
         schedule: "1 * * * *"
         prompt_file: ./prompts/hourly_review.md
+      - name: hl_stack_cycle
+        schedule: "6 * * * *"
+        command: |
+          ./ops/run_dry_cycle.sh &&
+          printf 'hl_stack dry cycle completed.\nartifacts: %s\n' "$IMCODEX_JOB_ARTIFACTS_DIR" > "$IMCODEX_JOB_SUMMARY_FILE"
 ```
 
 Supported environment-variable overrides:
@@ -134,11 +149,43 @@ export TELEGRAM_BASE_URL=https://api.telegram.org
 
 | Item | Behavior |
 | --- | --- |
-| Session model | Each job owns one long-lived `tmux` / Codex session |
+| Job types | `prompt_file` sends Markdown into a persistent Codex session; `command` runs `sh -lc` in `cwd` |
 | Relationship to main chat | Fully isolated; no shared Codex context |
-| Trigger behavior | At the scheduled time, `imcodex` reads `prompt_file` and sends it to that job session |
-| Group output | Only the final visible output or a failure notice is posted back |
+| Trigger behavior | At the scheduled time, `imcodex` sends the prompt or executes the command |
+| Group output | `prompt_file` jobs post final visible output; `command` jobs post `summary_file` when present, otherwise a tail of captured output |
 | Overlap policy | If a job is still running when the next trigger arrives, the new trigger is skipped |
+
+### Command Job Artifacts
+
+| Item | Behavior |
+| --- | --- |
+| Default artifact root | `cwd/.imcodex/jobs/<job-name>/<run-id>/` |
+| Auto-written logs | `stdout.log`, `stderr.log`, `combined.log` |
+| Success summary | Defaults to `$IMCODEX_JOB_ARTIFACTS_DIR/summary.md` when `summary_file` is not set |
+| Failure hint | If command output contains stage lines such as `[2/3] cache record-once`, the last stage is echoed in the failure post |
+
+Injected environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `IMCODEX_JOB_NAME` | Job name |
+| `IMCODEX_JOB_GROUP_ID` | Group / chat ID |
+| `IMCODEX_JOB_RUN_ID` | Unique run ID |
+| `IMCODEX_JOB_CWD` | Job working directory |
+| `IMCODEX_JOB_ARTIFACTS_DIR` | Per-run artifact directory |
+| `IMCODEX_JOB_SUMMARY_FILE` | Summary file path to write |
+| `IMCODEX_JOB_STDOUT_FILE` | Captured stdout log path |
+| `IMCODEX_JOB_STDERR_FILE` | Captured stderr log path |
+| `IMCODEX_JOB_COMBINED_FILE` | Combined stdout/stderr log path |
+
+### `hl_stack`
+
+| Recommendation | Why |
+| --- | --- |
+| Prefer `command` jobs | `hl_stack` is primarily a CLI toolchain |
+| Keep stage markers like `[1/3] doctor` in scripts | `imcodex` can surface the last stage on failure |
+| Write a short summary to `$IMCODEX_JOB_SUMMARY_FILE` | Keeps group posts concise while full logs stay in artifacts |
+| Save JSON outputs under `$IMCODEX_JOB_ARTIFACTS_DIR` | Preserves `decision_context.json`, `plan.json`, `execution.json` and similar artifacts |
 
 ## Build
 
@@ -175,9 +222,12 @@ imcodex started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 
 | Multi-line input | Preserved as one pasted input |
 | Slash commands | Forwarded as-is, for example `/new` or `/compact` |
 | Images / files | Downloaded into `cwd/.imcodex/inbox/`, then forwarded as a short text prompt with the saved path |
+| Telegram live output | Sends one early working status, then edits an active message after a short idle debounce; long replies roll over into a small number of continuation messages |
 | New message while main session is busy | Interrupts the current run and keeps only the newest pending message by default |
 | Job execution | Posts only the final result, not live incremental output |
 | Restart | Reuses existing `tmux` sessions when they still exist |
+
+Current Telegram defaults are internal constants: `working` after about `1s`, body flush after about `4s`, and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
 
 ## Inspect Sessions
 
@@ -206,8 +256,9 @@ Check:
 Check:
 
 1. `schedule` is a valid 5-field cron expression.
-2. `prompt_file` exists and is not empty.
-3. The job's `tmux` session is not still stuck in an earlier run.
+2. `prompt_file` exists and is not empty, or `command` is set.
+3. For `prompt_file` jobs, the job's `tmux` session is not still stuck in an earlier run.
+4. For `command` jobs, the command runs successfully from `cwd` when invoked with `sh -lc`.
 
 ## License
 

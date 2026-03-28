@@ -68,6 +68,39 @@ groups:
 	}
 }
 
+func TestParseConfigReadsCommandJobAndResolvesPathsFromCWD(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+    jobs:
+      - name: hl_stack_cycle
+        schedule: "1 * * * *"
+        command: ./ops/run_dry_cycle.sh
+        artifacts_dir: ./.imcodex/jobs/hl_stack_cycle
+        summary_file: ./.imcodex/jobs/hl_stack_cycle/latest-summary.md
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	job := cfg.groups[0].Jobs[0]
+	if got, want := job.Command, "./ops/run_dry_cycle.sh"; got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+	if got, want := job.ArtifactsDir, "/srv/demo/.imcodex/jobs/hl_stack_cycle"; got != want {
+		t.Fatalf("artifacts_dir = %q, want %q", got, want)
+	}
+	if got, want := job.SummaryFile, "/srv/demo/.imcodex/jobs/hl_stack_cycle/latest-summary.md"; got != want {
+		t.Fatalf("summary_file = %q, want %q", got, want)
+	}
+}
+
 func TestParseConfigReadsInterruptOnNewMessage(t *testing.T) {
 	t.Parallel()
 
@@ -266,7 +299,7 @@ groups:
 	}
 }
 
-func TestParseConfigRejectsJobWithoutPromptFile(t *testing.T) {
+func TestParseConfigRejectsJobWithoutPromptFileOrCommand(t *testing.T) {
 	t.Parallel()
 
 	_, err := parseConfig(nil, envLookup(map[string]string{
@@ -280,8 +313,29 @@ groups:
       - name: hourly_review
         schedule: "1 * * * *"
 `))
-	if err == nil || !strings.Contains(err.Error(), "prompt_file") {
-		t.Fatalf("parseConfig() error = %v, want prompt_file error", err)
+	if err == nil || !strings.Contains(err.Error(), "must set one of prompt_file or command") {
+		t.Fatalf("parseConfig() error = %v, want prompt_file-or-command error", err)
+	}
+}
+
+func TestParseConfigRejectsJobWithPromptFileAndCommand(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/a
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+        prompt_file: /srv/a/prompts/hourly.md
+        command: ./ops/run_dry_cycle.sh
+`))
+	if err == nil || !strings.Contains(err.Error(), "only one of prompt_file or command") {
+		t.Fatalf("parseConfig() error = %v, want prompt_file-vs-command error", err)
 	}
 }
 

@@ -40,9 +40,12 @@ type groupConfig struct {
 }
 
 type jobConfig struct {
-	Name       string `yaml:"name"`
-	Schedule   string `yaml:"schedule"`
-	PromptFile string `yaml:"prompt_file"`
+	Name         string `yaml:"name"`
+	Schedule     string `yaml:"schedule"`
+	PromptFile   string `yaml:"prompt_file"`
+	Command      string `yaml:"command"`
+	ArtifactsDir string `yaml:"artifacts_dir"`
+	SummaryFile  string `yaml:"summary_file"`
 }
 
 type fileConfig struct {
@@ -132,17 +135,21 @@ func loadConfigFile(path string, lookupEnv func(string) (string, bool), readFile
 func normalizeGroups(groups []groupConfig, configPath string) []groupConfig {
 	out := make([]groupConfig, 0, len(groups))
 	for _, group := range groups {
+		cwd := strings.TrimSpace(group.CWD)
 		jobs := make([]jobConfig, 0, len(group.Jobs))
 		for _, job := range group.Jobs {
 			jobs = append(jobs, jobConfig{
-				Name:       strings.TrimSpace(job.Name),
-				Schedule:   strings.TrimSpace(job.Schedule),
-				PromptFile: resolveConfigRelativePath(configPath, job.PromptFile),
+				Name:         strings.TrimSpace(job.Name),
+				Schedule:     strings.TrimSpace(job.Schedule),
+				PromptFile:   resolveConfigRelativePath(configPath, job.PromptFile),
+				Command:      strings.TrimSpace(job.Command),
+				ArtifactsDir: resolveWorkingDirRelativePath(cwd, job.ArtifactsDir),
+				SummaryFile:  resolveWorkingDirRelativePath(cwd, job.SummaryFile),
 			})
 		}
 		out = append(out, groupConfig{
 			GroupID: strings.TrimSpace(group.GroupID),
-			CWD:     strings.TrimSpace(group.CWD),
+			CWD:     cwd,
 			Jobs:    jobs,
 		})
 	}
@@ -194,13 +201,21 @@ func (c config) validate() error {
 
 		jobSeen := make(map[string]struct{}, len(group.Jobs))
 		for j, job := range group.Jobs {
+			hasPrompt := job.PromptFile != ""
+			hasCommand := job.Command != ""
 			switch {
 			case job.Name == "":
 				return fmt.Errorf("groups[%d].jobs[%d].name is required", i, j)
 			case job.Schedule == "":
 				return fmt.Errorf("groups[%d].jobs[%d].schedule is required", i, j)
-			case job.PromptFile == "":
-				return fmt.Errorf("groups[%d].jobs[%d].prompt_file is required", i, j)
+			case hasPrompt && hasCommand:
+				return fmt.Errorf("groups[%d].jobs[%d] must set only one of prompt_file or command", i, j)
+			case !hasPrompt && !hasCommand:
+				return fmt.Errorf("groups[%d].jobs[%d] must set one of prompt_file or command", i, j)
+			case !hasCommand && job.ArtifactsDir != "":
+				return fmt.Errorf("groups[%d].jobs[%d].artifacts_dir requires command", i, j)
+			case !hasCommand && job.SummaryFile != "":
+				return fmt.Errorf("groups[%d].jobs[%d].summary_file requires command", i, j)
 			}
 			if _, ok := jobSeen[job.Name]; ok {
 				return fmt.Errorf("duplicate job name in group %s: %s", group.GroupID, job.Name)
@@ -250,4 +265,12 @@ func resolveConfigRelativePath(configPath string, value string) string {
 		configDir = absDir
 	}
 	return filepath.Clean(filepath.Join(configDir, value))
+}
+
+func resolveWorkingDirRelativePath(cwd string, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || filepath.IsAbs(value) || strings.TrimSpace(cwd) == "" {
+		return value
+	}
+	return filepath.Clean(filepath.Join(strings.TrimSpace(cwd), value))
 }

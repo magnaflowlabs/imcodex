@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,62 @@ func (f *fakeMessenger) all() []string {
 	defer f.mu.Unlock()
 	out := make([]string, len(f.texts))
 	copy(out, f.texts)
+	return out
+}
+
+type fakeEditableMessenger struct {
+	mu       sync.Mutex
+	nextID   int
+	messages []trackedMessage
+	events   []string
+}
+
+func (f *fakeEditableMessenger) SendTextToChat(ctx context.Context, groupID string, text string) error {
+	_, err := f.SendTextToChatWithID(ctx, groupID, text)
+	return err
+}
+
+func (f *fakeEditableMessenger) SendTextToChatWithID(_ context.Context, _ string, text string) (SentMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.nextID++
+	id := strconv.Itoa(f.nextID)
+	f.messages = append(f.messages, trackedMessage{messageID: id, text: text})
+	f.events = append(f.events, "send:"+id+":"+text)
+	return SentMessage{MessageID: id}, nil
+}
+
+func (f *fakeEditableMessenger) EditTextInChat(_ context.Context, _ string, messageID string, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := range f.messages {
+		if f.messages[i].messageID != messageID {
+			continue
+		}
+		f.messages[i].text = text
+		f.events = append(f.events, "edit:"+messageID+":"+text)
+		return nil
+	}
+	return errors.New("message not found")
+}
+
+func (f *fakeEditableMessenger) all() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.messages))
+	for _, msg := range f.messages {
+		out = append(out, msg.text)
+	}
+	return out
+}
+
+func (f *fakeEditableMessenger) allEvents() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.events))
+	copy(out, f.events)
 	return out
 }
 
@@ -593,6 +650,222 @@ func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	}
 	if !strings.Contains(joined, "new reply start") {
 		t.Fatalf("messages = %#v, want current reply forwarded", messenger.all())
+	}
+}
+
+func TestServiceEditableMessengerEditsWorkingMessageIntoReply(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• final reply",
+			"• final reply",
+		},
+	}
+	messenger := &fakeEditableMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.workingAfter = 5 * time.Millisecond
+	svc.flushIdleTicks = 2
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "hello",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 1 && got[0] == "• final reply"
+	})
+
+	if got := nonStatusMessages(messenger.all()); len(got) != 1 || got[0] != "• final reply" {
+		t.Fatalf("messages = %#v, want single edited final reply", got)
+	}
+	events := messenger.allEvents()
+	joinedEvents := strings.Join(events, "\n")
+	if !strings.Contains(joinedEvents, "send:") || !strings.Contains(joinedEvents, workingStatusText) || !strings.Contains(joinedEvents, "edit:") || !strings.Contains(joinedEvents, "• final reply") {
+		t.Fatalf("events = %#v, want send working then edit final reply", events)
+	}
+}
+
+func TestServiceEditableMessengerRollsOverLongReply(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const reply = "abcdefghijklmnopqrstuvwx"
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			reply,
+			reply,
+		},
+	}
+	messenger := &fakeEditableMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.workingAfter = 5 * time.Millisecond
+	svc.flushIdleTicks = 2
+	svc.editRolloverAt = 10
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "long reply",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		return len(nonStatusMessages(messenger.all())) == 3
+	})
+
+	got := nonStatusMessages(messenger.all())
+	want := []string{"abcdefghij", "klmnopqrst", "uvwx"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("messages = %#v, want %#v", got, want)
+	}
+}
+
+func TestServiceEditableMessengerKeepsPreviousReplyWhenNewRequestStarts(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• first reply",
+			"• first reply",
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• second reply",
+			"• second reply",
+		},
+	}
+	messenger := &fakeEditableMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.workingAfter = 5 * time.Millisecond
+	svc.flushIdleTicks = 2
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "first",
+	}); err != nil {
+		t.Fatalf("HandleMessage(first) error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 1 && got[0] == "• first reply"
+	})
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_2",
+		GroupID:   "oc_1",
+		Text:      "second",
+	}); err != nil {
+		t.Fatalf("HandleMessage(second) error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 2 && got[1] == "• second reply"
+	})
+
+	got := nonStatusMessages(messenger.all())
+	want := []string{"• first reply", "• second reply"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("messages = %#v, want %#v", got, want)
+	}
+}
+
+func TestServiceFlushesBufferedReplyBeforeDispatchingNextMessage(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• first reply",
+			"• first reply",
+			"• first reply",
+			"• first reply",
+			"• first reply",
+			"• first reply",
+			"• first reply",
+			"",
+			"",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 20 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 50
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "first",
+	}); err != nil {
+		t.Fatalf("HandleMessage(first) error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := console.allSendTexts()
+		return len(got) >= 1 && got[0] == "first"
+	})
+
+	time.Sleep(80 * time.Millisecond)
+	if got := nonStatusMessages(messenger.all()); len(got) != 0 {
+		t.Fatalf("messages = %#v, want first reply still buffered", got)
+	}
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_2",
+		GroupID:   "oc_1",
+		Text:      "second",
+	}); err != nil {
+		t.Fatalf("HandleMessage(second) error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		return len(nonStatusMessages(messenger.all())) >= 1 && len(console.allSendTexts()) >= 2
+	})
+
+	if got := nonStatusMessages(messenger.all())[0]; got != "• first reply" {
+		t.Fatalf("outputs[0] = %q, want flushed first reply before second dispatch", got)
+	}
+	if got := console.allSendTexts()[1]; got != "second" {
+		t.Fatalf("sendTexts[1] = %q, want second prompt dispatched", got)
 	}
 }
 
