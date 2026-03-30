@@ -95,3 +95,19 @@ func TestNormalizeSnapshotKeepsModelLikeContentLines(t *testing.T) {
 		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, raw)
 	}
 }
+
+func TestNormalizeSnapshotKeepsNonPromptLinesAfterPromptPrefix(t *testing.T) {
+	t.Parallel()
+
+	raw := `› First line from user
+Second line from user
+Third line from user
+
+• Assistant reply`
+
+	got := NormalizeSnapshot(raw)
+	want := "Second line from user\nThird line from user\n\n• Assistant reply"
+	if got != want {
+		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, want)
+	}
+}

@@ -723,6 +723,50 @@ func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	}
 }
 
+func TestServiceDoesNotForwardMultilinePromptEchoTail(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"› line one\nline two\nline three\n\n• final reply",
+			"› line one\nline two\nline three\n\n• final reply",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 2
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "line one\nline two\nline three",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) >= 1
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if strings.Contains(joined, "line two") || strings.Contains(joined, "line three") {
+		t.Fatalf("messages = %#v, want prompt echo tail suppressed", messenger.all())
+	}
+	if !strings.Contains(joined, "• final reply") {
+		t.Fatalf("messages = %#v, want final reply forwarded", messenger.all())
+	}
+}
+
 func TestServiceRefreshesBaselineBeforeDispatchingNewRequest(t *testing.T) {
 	t.Parallel()
 
@@ -1365,7 +1409,7 @@ func TestServiceEditableMessengerDoesNotRetryWhenMessageNotModified(t *testing.T
 	}
 }
 
-func TestServicePollSkipsUnarmedOutputAndDisarmsAfterFinalFlush(t *testing.T) {
+func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1411,20 +1455,17 @@ func TestServicePollSkipsUnarmedOutputAndDisarmsAfterFinalFlush(t *testing.T) {
 		t.Fatalf("messages after armed poll = %#v, want only fresh delta", got)
 	}
 	if !rt.outputArmed {
-		t.Fatalf("outputArmed = false, want still armed until idle-stable poll")
-	}
-
-	svc.poll(rt)
-	if rt.outputArmed {
-		t.Fatalf("outputArmed = true, want auto-disarmed after idle-stable poll")
-	}
-	if got := nonStatusMessages(messenger.all()); len(got) != 1 {
-		t.Fatalf("messages during disarm poll = %#v, want no new output", got)
+		t.Fatalf("outputArmed = false, want armed after first dispatch")
 	}
 
 	svc.poll(rt)
 	if got := nonStatusMessages(messenger.all()); len(got) != 1 {
-		t.Fatalf("messages after disarm = %#v, want no unsolicited forwarding", got)
+		t.Fatalf("messages after stable poll = %#v, want no duplicate forwarding", got)
+	}
+
+	svc.poll(rt)
+	if got := nonStatusMessages(messenger.all()); len(got) != 2 || got[1] != "• unsolicited" {
+		t.Fatalf("messages after first dispatch = %#v, want ongoing forwarding while armed", got)
 	}
 }
 

@@ -121,6 +121,8 @@ type groupRuntime struct {
 	pending              []IncomingMessage
 	active               *activeRequest
 	outputArmed          bool
+	promptEchoTail       string
+	promptEchoPending    bool
 	sessionReady         bool
 	lastText             string
 	baseText             string
@@ -317,6 +319,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		strings.TrimSpace(rt.outputText) != "" ||
 		len(rt.outputMessages) > 0 ||
 		len(rt.detachedOutputs) > 0 ||
+		rt.promptEchoPending ||
 		!rt.detachedBackoffUntil.IsZero() ||
 		!rt.editBackoffUntil.IsZero()
 
@@ -343,6 +346,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.clearOutputBuffer()
 		rt.outputText = ""
 		rt.outputMessages = nil
+		rt.promptEchoTail = ""
+		rt.promptEchoPending = false
 		rt.detachedBackoffUntil = time.Time{}
 		rt.detachedRetryCount = 0
 		rt.editBackoffUntil = time.Time{}
@@ -394,6 +399,8 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.idleTicks = 0
 		rt.lastText = ""
 		rt.outputArmed = false
+		rt.promptEchoTail = ""
+		rt.promptEchoPending = false
 		rt.clearOutputBuffer()
 		rt.outputText = ""
 		rt.outputMessages = nil
@@ -457,6 +464,8 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	rt.lastBusy = true
 	rt.idleTicks = 0
 	rt.outputArmed = true
+	rt.promptEchoTail = normalizePromptEchoTail(req.input)
+	rt.promptEchoPending = rt.promptEchoTail != ""
 	rt.clearOutputBuffer()
 	rt.outputText = ""
 	rt.editBackoffUntil = time.Time{}
@@ -504,6 +513,14 @@ func (s *Service) poll(rt *groupRuntime) {
 	currFullText := tmuxctl.NormalizeSnapshot(snapshot)
 	prevText := tmuxctl.SliceAfter(rt.baseText, rt.lastText)
 	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
+	if rt.promptEchoPending {
+		prevText, _ = suppressPromptEchoPrefix(prevText, rt.promptEchoTail)
+		var consumed bool
+		currText, consumed = suppressPromptEchoPrefix(currText, rt.promptEchoTail)
+		if consumed || strings.TrimSpace(currText) != "" {
+			rt.promptEchoPending = false
+		}
+	}
 	busy := tmuxctl.IsBusy(snapshot)
 	becameIdle := rt.lastBusy && !busy
 	delta, reset := tmuxctl.DiffText(prevText, currText)
@@ -554,13 +571,6 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.interruptSentAt = time.Time{}
 		rt.forceInterruptSent = false
 		rt.active = nil
-		disarmIdleTicks := s.flushIdleTicks
-		if disarmIdleTicks <= 0 {
-			disarmIdleTicks = 1
-		}
-		if rt.canDisarmOutput() && rt.idleTicks >= disarmIdleTicks && strings.TrimSpace(delta) == "" && !reset {
-			rt.outputArmed = false
-		}
 	}
 
 	if !busy && len(rt.pending) > 0 {
@@ -597,6 +607,71 @@ func shouldFlushOnSize(rt *groupRuntime, softLimit int, hardLimit int) bool {
 		return false
 	}
 	return utf8.RuneCountInString(candidate) >= limit
+}
+
+func normalizePromptEchoTail(input string) string {
+	input = strings.ReplaceAll(input, "\r\n", "\n")
+	lines := strings.Split(input, "\n")
+	if len(lines) <= 1 {
+		return ""
+	}
+	tail := normalizePromptEchoLines(lines[1:])
+	if len(tail) == 0 {
+		return ""
+	}
+	return strings.Join(tail, "\n")
+}
+
+func normalizePromptEchoLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	prevBlank := false
+	for _, line := range lines {
+		line = strings.TrimRight(line, " \t\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if len(out) == 0 || prevBlank {
+				continue
+			}
+			out = append(out, "")
+			prevBlank = true
+			continue
+		}
+		out = append(out, line)
+		prevBlank = false
+	}
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+func suppressPromptEchoPrefix(text string, echoTail string) (string, bool) {
+	text = strings.TrimLeft(text, "\n")
+	echoTail = strings.Trim(echoTail, "\n")
+	if text == "" || echoTail == "" {
+		return text, false
+	}
+	if strings.HasPrefix(text, echoTail) {
+		return strings.TrimLeft(text[len(echoTail):], "\n"), true
+	}
+	lines := strings.Split(echoTail, "\n")
+	for i := 1; i < len(lines); i++ {
+		suffix := strings.Join(lines[i:], "\n")
+		if !usablePromptEchoSuffix(suffix) {
+			continue
+		}
+		if strings.HasPrefix(text, suffix) {
+			return strings.TrimLeft(text[len(suffix):], "\n"), true
+		}
+	}
+	return text, false
+}
+
+func usablePromptEchoSuffix(s string) bool {
+	if strings.Contains(s, "\n") {
+		return true
+	}
+	return utf8.RuneCountInString(strings.TrimSpace(s)) >= 8
 }
 
 func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) {
@@ -1249,25 +1324,6 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 		rt.detachedOutputs = rt.detachedOutputs[1:]
 		rt.detachedRetryCount = 0
 	}
-}
-
-func (rt *groupRuntime) canDisarmOutput() bool {
-	if rt == nil {
-		return true
-	}
-	if rt.lastBusy || rt.active != nil {
-		return false
-	}
-	if len(rt.pending) > 0 {
-		return false
-	}
-	if rt.hasBufferedOutput() || len(rt.detachedOutputs) > 0 {
-		return false
-	}
-	if !rt.detachedBackoffUntil.IsZero() || !rt.editBackoffUntil.IsZero() {
-		return false
-	}
-	return true
 }
 
 func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenger, desiredText string) error {
