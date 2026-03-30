@@ -49,10 +49,17 @@ func DiffText(prev string, curr string) (string, bool) {
 	if strings.HasPrefix(curr, prev) {
 		return curr[len(prev):], false
 	}
-	if overlap := suffixPrefixOverlap(prev, curr); overlap > 0 {
+	if overlap := suffixPrefixOverlap(prev, curr); hasUsableOverlap(overlap) {
 		return curr[overlap:], false
 	}
 	return curr, true
+}
+
+func hasUsableOverlap(overlap int) bool {
+	// Tiny accidental overlaps (for example one shared punctuation mark)
+	// can incorrectly classify a reset as append-only and cause repeated text.
+	const minStableOverlap = 8
+	return overlap >= minStableOverlap
 }
 
 func SliceAfter(base string, curr string) string {

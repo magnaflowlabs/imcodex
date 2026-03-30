@@ -1043,6 +1043,65 @@ func TestServiceEditableMessengerFlushesBufferedReplyWhileBusy(t *testing.T) {
 	}
 }
 
+func TestServiceEditableMessengerFlushesBufferedReplyImmediatelyWhenBusyEnds(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• alpha\n\n• Working (2s • esc to interrupt)",
+			"• alpha\n\n• omega",
+			"• alpha\n\n• omega",
+		},
+	}
+	messenger := &fakeEditableMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.workingAfter = 5 * time.Millisecond
+	svc.busyFlushAfter = time.Hour
+	svc.flushIdleTicks = 200
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "hello",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 1 && got[0] == "• alpha\n\n• omega"
+	})
+}
+
+func TestMergeBufferedOutputDeduplicatesTailOverlap(t *testing.T) {
+	t.Parallel()
+
+	got := mergeBufferedOutput("• alpha\n• beta", "• beta\n• gamma")
+	want := "• alpha\n• beta\n• gamma"
+	if got != want {
+		t.Fatalf("mergeBufferedOutput() = %q, want %q", got, want)
+	}
+}
+
+func TestMergeBufferedOutputKeepsTinyOverlapAsAppend(t *testing.T) {
+	t.Parallel()
+
+	got := mergeBufferedOutput("abcdefghij", "ij-klm")
+	want := "abcdefghijij-klm"
+	if got != want {
+		t.Fatalf("mergeBufferedOutput() = %q, want %q", got, want)
+	}
+}
+
 func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 	t.Parallel()
 
@@ -1094,6 +1153,52 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 	})
 	if got := messenger.editCount(); got < 2 {
 		t.Fatalf("editCount = %d, want retry after retry_after window", got)
+	}
+}
+
+func TestServiceEditableMessengerDoesNotRetryWhenMessageNotModified(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• first",
+			"• first",
+			"• first",
+			"• first",
+		},
+	}
+	messenger := &fakeEditableMessenger{
+		editErrs: []error{
+			errors.New("telegram api failed: http=400 code=400 desc=Bad Request: message is not modified"),
+		},
+	}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.workingAfter = 5 * time.Millisecond
+	svc.flushIdleTicks = 1
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "hello",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		return messenger.editCount() >= 1
+	})
+	time.Sleep(200 * time.Millisecond)
+	if got := messenger.editCount(); got != 1 {
+		t.Fatalf("editCount = %d, want 1 without retry loop on message-not-modified", got)
 	}
 }
 

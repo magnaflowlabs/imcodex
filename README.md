@@ -211,7 +211,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 1.1.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 1.1.1 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior
@@ -228,7 +228,7 @@ imcodex 1.1.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 j
 | Job execution | Posts only the final result, not live incremental output |
 | Restart | Reuses existing `tmux` sessions when they still exist |
 
-Current Telegram defaults are internal constants: `working` after about `1s`, partial body refresh at most every `5s` while Codex is still busy, idle body flush after about `4s`, and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
+Current Telegram defaults are internal constants: `working` after about `1s`, partial body refresh at most every `5s` while Codex is still busy, immediate body flush when busy transitions to idle (with an idle debounce fallback around `4s`), and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
 
 ## Inspect Sessions
 

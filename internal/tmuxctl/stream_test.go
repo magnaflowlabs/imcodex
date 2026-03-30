@@ -60,6 +60,21 @@ func TestDiffTextReportsReset(t *testing.T) {
 	}
 }
 
+func TestDiffTextTreatsTinyOverlapAsReset(t *testing.T) {
+	t.Parallel()
+
+	prev := "• alpha\n• beta"
+	curr := "• alpha revised\n• gamma"
+
+	delta, reset := DiffText(prev, curr)
+	if !reset {
+		t.Fatal("reset = false, want true for tiny accidental overlap")
+	}
+	if got, want := delta, curr; got != want {
+		t.Fatalf("delta = %q, want %q", got, want)
+	}
+}
+
 func TestIsBusyHandlesTrailingPromptPlaceholder(t *testing.T) {
 	t.Parallel()
 

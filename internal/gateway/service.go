@@ -446,6 +446,7 @@ func (s *Service) poll(rt *groupRuntime) {
 	prevText := tmuxctl.SliceAfter(rt.baseText, rt.lastText)
 	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
 	busy := tmuxctl.IsBusy(snapshot)
+	becameIdle := rt.lastBusy && !busy
 	delta, reset := tmuxctl.DiffText(prevText, currText)
 
 	if busy {
@@ -475,7 +476,9 @@ func (s *Service) poll(rt *groupRuntime) {
 	if reset {
 		s.resetBufferedOutput(rt, currText)
 	}
-	if shouldFlush(rt.outputBuffer, rt.outputBufferedAt, busy, rt.idleTicks, s.flushIdleTicks, s.busyFlushAfter, time.Now()) {
+	if becameIdle && strings.TrimSpace(rt.outputBuffer) != "" && s.editableMessenger() != nil {
+		s.flushOutputBuffer(rt)
+	} else if shouldFlush(rt.outputBuffer, rt.outputBufferedAt, busy, rt.idleTicks, s.flushIdleTicks, s.busyFlushAfter, time.Now()) {
 		s.flushOutputBuffer(rt)
 	}
 
@@ -837,12 +840,17 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 		return
 	}
 	candidateText := rt.outputText + raw
+	candidateText = mergeBufferedOutput(rt.outputText, raw)
 	desiredText := strings.Trim(candidateText, "\n")
 	if strings.TrimSpace(desiredText) == "" {
 		rt.outputText = candidateText
 		return
 	}
 	if err := s.syncEditableOutput(rt, editable, desiredText); err != nil {
+		if isMessageNotModifiedError(err) {
+			rt.outputText = candidateText
+			return
+		}
 		rt.outputBuffer = raw + rt.outputBuffer
 		if rt.outputBufferedAt.IsZero() {
 			rt.outputBufferedAt = bufferedAt
@@ -866,6 +874,59 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 		return
 	}
 	rt.outputText = candidateText
+}
+
+func isMessageNotModifiedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if text == "" || !strings.Contains(text, "message is not modified") {
+		return false
+	}
+	return strings.Contains(text, "code=400") || strings.Contains(text, "http=400")
+}
+
+func mergeBufferedOutput(existing string, delta string) string {
+	if delta == "" {
+		return existing
+	}
+	if existing == "" {
+		return delta
+	}
+	if strings.HasPrefix(delta, existing) {
+		return delta
+	}
+	if strings.HasSuffix(existing, delta) {
+		return existing
+	}
+	if overlap := suffixPrefixOverlap(existing, delta); usableMergeOverlap(delta, overlap) {
+		return existing + delta[overlap:]
+	}
+	return existing + delta
+}
+
+func usableMergeOverlap(delta string, overlap int) bool {
+	if overlap <= 0 || overlap > len(delta) {
+		return false
+	}
+	if overlap >= 8 {
+		return true
+	}
+	return strings.Contains(delta[:overlap], "\n")
+}
+
+func suffixPrefixOverlap(prev string, curr string) int {
+	limit := len(prev)
+	if len(curr) < limit {
+		limit = len(curr)
+	}
+	for size := limit; size > 0; size-- {
+		if prev[len(prev)-size:] == curr[:size] {
+			return size
+		}
+	}
+	return 0
 }
 
 func retryAfterFromRateLimitError(err error) time.Duration {

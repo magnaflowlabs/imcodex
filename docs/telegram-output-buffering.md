@@ -37,7 +37,7 @@
 | Codex is still thinking | After a short delay, send one status message such as `[working] Codex is processing.` and keep its Telegram `message_id` as the active output message |
 | Codex starts producing content | Buffer reply text; do not send each short pause as a separate Telegram message |
 | Codex keeps running for a while | If buffered body text has not been shown for too long, edit the active Telegram message with the latest partial body |
-| Codex becomes idle | Flush buffered reply text after the debounce window by editing the active Telegram message |
+| Codex becomes idle | Flush buffered reply text immediately on busy→idle transition (idle debounce remains as a fallback path) |
 | Active message nears Telegram limit | Finalize the current message and create a new continuation message, then continue editing the new one |
 | New user prompt arrives while previous reply text is buffered | Flush buffered text first, then dispatch the new prompt |
 
@@ -60,7 +60,7 @@
 | 2 | If Codex is still busy at `working_after`, send one `[working]` message and store its Telegram `message_id` |
 | 3 | While Codex is generating, append deltas to an internal reply buffer |
 | 4 | If Codex stays busy and buffered body text has been hidden for `busy_flush_after`, merge the latest buffered text into the active Telegram message with `editMessageText` |
-| 5 | After `body_flush_after` of idle time, merge any remaining buffered text into the active Telegram message |
+| 5 | On busy→idle transition, merge buffered text into the active Telegram message immediately (with `body_flush_after` as fallback for edge cases) |
 | 6 | If the merged text would exceed `edit_rollover_at`, keep the current message as-is, send a new continuation message, and continue edits there |
 | 7 | If a new user prompt arrives before the buffered text is flushed, flush first, then dispatch the new prompt |
 | 8 | Right before dispatch, refresh the tmux baseline so the next reply cannot replay stale tail output from the prior run |
