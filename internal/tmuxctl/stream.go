@@ -106,6 +106,24 @@ func IsBusy(snapshot string) bool {
 	return false
 }
 
+// InputStatusSlot returns the text on the line directly above the input prompt line.
+// The boolean indicates whether a prompt line was found in the snapshot.
+func InputStatusSlot(snapshot string) (string, bool) {
+	snapshot = stripANSI(snapshot)
+	lines := strings.Split(snapshot, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(lines[i], " \t\r")
+		if !isPromptLine(strings.TrimSpace(line)) {
+			continue
+		}
+		if i == 0 {
+			return "", true
+		}
+		return strings.TrimSpace(strings.TrimRight(lines[i-1], " \t\r")), true
+	}
+	return "", false
+}
+
 func IsTrustPrompt(snapshot string) bool {
 	return strings.Contains(snapshot, "Do you trust the contents of this directory?") ||
 		strings.Contains(snapshot, "Press enter to continue")
@@ -141,13 +159,18 @@ func isTrailingBusyChrome(line string) bool {
 	if line == "" {
 		return true
 	}
-	if line == "›" || line == ">" {
-		return true
-	}
-	if strings.HasPrefix(line, "›") {
+	if isPromptLine(line) {
 		return true
 	}
 	return shouldIgnoreLine(line)
+}
+
+func isPromptLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	return line == "›" || line == ">" || strings.HasPrefix(line, "›") || strings.HasPrefix(line, ">")
 }
 
 func suffixPrefixOverlap(prev string, curr string) int {

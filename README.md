@@ -211,7 +211,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 1.1.7 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 1.1.8 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior

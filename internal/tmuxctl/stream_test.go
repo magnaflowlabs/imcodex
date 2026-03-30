@@ -111,3 +111,35 @@ Third line from user
 		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, want)
 	}
 }
+
+func TestInputStatusSlot(t *testing.T) {
+	t.Parallel()
+
+	slot, ok := InputStatusSlot("• Working (2s • esc to interrupt)\n› explain")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if got, want := slot, "• Working (2s • esc to interrupt)"; got != want {
+		t.Fatalf("slot = %q, want %q", got, want)
+	}
+}
+
+func TestInputStatusSlotEmptyStatusLine(t *testing.T) {
+	t.Parallel()
+
+	slot, ok := InputStatusSlot("• final reply\n\n› ")
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if got, want := slot, ""; got != want {
+		t.Fatalf("slot = %q, want empty status slot", got)
+	}
+}
+
+func TestInputStatusSlotMissingPrompt(t *testing.T) {
+	t.Parallel()
+
+	if _, ok := InputStatusSlot("• final reply only"); ok {
+		t.Fatal("ok = true, want false when prompt line is missing")
+	}
+}

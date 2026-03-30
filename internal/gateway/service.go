@@ -26,6 +26,7 @@ const (
 	defaultWorkingAfter    = time.Second
 	defaultChatActionEvery = 4 * time.Second
 	defaultBusyFlushAfter  = 5 * time.Second
+	defaultCompleteAfter   = 0 * time.Millisecond
 	defaultEditRolloverAt  = 2800
 	workingStatusText      = "[working] Codex is processing."
 )
@@ -99,6 +100,7 @@ type Service struct {
 	workingAfter        time.Duration
 	chatActionEvery     time.Duration
 	busyFlushAfter      time.Duration
+	completeAfter       time.Duration
 	editRolloverAt      int
 	interruptForceAfter time.Duration
 
@@ -123,6 +125,8 @@ type groupRuntime struct {
 	outputArmed          bool
 	promptEchoTail       string
 	promptEchoPending    bool
+	statusSlotEmptySince time.Time
+	lastProgressAt       time.Time
 	sessionReady         bool
 	lastText             string
 	baseText             string
@@ -169,6 +173,7 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		workingAfter:        defaultWorkingAfter,
 		chatActionEvery:     defaultChatActionEvery,
 		busyFlushAfter:      defaultBusyFlushAfter,
+		completeAfter:       defaultCompleteAfter,
 		editRolloverAt:      defaultEditRolloverAt,
 		interruptForceAfter: time.Second,
 	}
@@ -348,6 +353,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.outputMessages = nil
 		rt.promptEchoTail = ""
 		rt.promptEchoPending = false
+		rt.statusSlotEmptySince = time.Time{}
+		rt.lastProgressAt = time.Time{}
 		rt.detachedBackoffUntil = time.Time{}
 		rt.detachedRetryCount = 0
 		rt.editBackoffUntil = time.Time{}
@@ -401,6 +408,8 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.outputArmed = false
 		rt.promptEchoTail = ""
 		rt.promptEchoPending = false
+		rt.statusSlotEmptySince = time.Time{}
+		rt.lastProgressAt = time.Time{}
 		rt.clearOutputBuffer()
 		rt.outputText = ""
 		rt.outputMessages = nil
@@ -466,10 +475,12 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	rt.outputArmed = true
 	rt.promptEchoTail = normalizePromptEchoTail(req.input)
 	rt.promptEchoPending = rt.promptEchoTail != ""
+	rt.statusSlotEmptySince = time.Time{}
 	rt.clearOutputBuffer()
 	rt.outputText = ""
 	rt.editBackoffUntil = time.Time{}
 	rt.busySince = time.Now()
+	rt.lastProgressAt = rt.busySince
 	rt.workingSent = false
 	rt.lastActionAt = time.Time{}
 	rt.interruptSentAt = time.Time{}
@@ -506,6 +517,8 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.busySince = time.Time{}
 		rt.workingSent = false
 		rt.lastActionAt = time.Time{}
+		rt.statusSlotEmptySince = time.Time{}
+		rt.lastProgressAt = time.Time{}
 		rt.active = nil
 		return
 	}
@@ -513,6 +526,7 @@ func (s *Service) poll(rt *groupRuntime) {
 	currFullText := tmuxctl.NormalizeSnapshot(snapshot)
 	prevText := tmuxctl.SliceAfter(rt.baseText, rt.lastText)
 	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
+	now := time.Now()
 	if rt.promptEchoPending {
 		prevText, _ = suppressPromptEchoPrefix(prevText, rt.promptEchoTail)
 		var consumed bool
@@ -521,9 +535,28 @@ func (s *Service) poll(rt *groupRuntime) {
 			rt.promptEchoPending = false
 		}
 	}
-	busy := tmuxctl.IsBusy(snapshot)
-	becameIdle := rt.lastBusy && !busy
 	delta, reset := tmuxctl.DiffText(prevText, currText)
+	progressed := strings.TrimSpace(delta) != "" || reset
+	if progressed {
+		rt.lastProgressAt = now
+	}
+
+	slotText, slotKnown := tmuxctl.InputStatusSlot(snapshot)
+	if slotKnown && strings.TrimSpace(slotText) == "" {
+		if rt.statusSlotEmptySince.IsZero() {
+			rt.statusSlotEmptySince = now
+		}
+	} else {
+		rt.statusSlotEmptySince = time.Time{}
+	}
+
+	busy := tmuxctl.IsBusy(snapshot)
+	if rt.active != nil && rt.lastBusy && !busy {
+		if !s.isCompletionConfirmed(rt, now, slotKnown) {
+			busy = true
+		}
+	}
+	becameIdle := rt.lastBusy && !busy
 
 	if busy {
 		rt.idleTicks = 0
@@ -549,7 +582,7 @@ func (s *Service) poll(rt *groupRuntime) {
 	}
 
 	if rt.outputArmed {
-		rt.appendOutputBuffer(delta, time.Now())
+		rt.appendOutputBuffer(delta, now)
 		if reset {
 			s.resetBufferedOutput(rt, currText)
 		}
@@ -557,7 +590,7 @@ func (s *Service) poll(rt *groupRuntime) {
 			s.flushOutputBuffer(rt)
 		} else if becameIdle && strings.TrimSpace(rt.outputBuffer) != "" && s.editableMessenger() != nil {
 			s.flushOutputBuffer(rt)
-		} else if shouldFlush(rt.outputBuffer, rt.outputBufferedAt, busy, rt.idleTicks, s.flushIdleTicks, s.busyFlushAfter, time.Now()) {
+		} else if shouldFlush(rt.outputBuffer, rt.outputBufferedAt, busy, rt.idleTicks, s.flushIdleTicks, s.busyFlushAfter, now) {
 			s.flushOutputBuffer(rt)
 		}
 	}
@@ -609,6 +642,33 @@ func shouldFlushOnSize(rt *groupRuntime, softLimit int, hardLimit int) bool {
 	return utf8.RuneCountInString(candidate) >= limit
 }
 
+func (s *Service) isCompletionConfirmed(rt *groupRuntime, now time.Time, slotKnown bool) bool {
+	if rt == nil {
+		return true
+	}
+	if !slotKnown {
+		// Fallback to legacy marker-only behavior when prompt/status slot is not visible.
+		return true
+	}
+	wait := s.completeAfter
+	if wait <= 0 {
+		wait = s.pollEvery
+	}
+	if wait <= 0 {
+		wait = 500 * time.Millisecond
+	}
+	if rt.statusSlotEmptySince.IsZero() {
+		return false
+	}
+	if now.Sub(rt.statusSlotEmptySince) < wait {
+		return false
+	}
+	if rt.lastProgressAt.IsZero() {
+		return true
+	}
+	return now.Sub(rt.lastProgressAt) >= wait
+}
+
 func normalizePromptEchoTail(input string) string {
 	input = strings.ReplaceAll(input, "\r\n", "\n")
 	lines := strings.Split(input, "\n")
@@ -654,24 +714,7 @@ func suppressPromptEchoPrefix(text string, echoTail string) (string, bool) {
 	if strings.HasPrefix(text, echoTail) {
 		return strings.TrimLeft(text[len(echoTail):], "\n"), true
 	}
-	lines := strings.Split(echoTail, "\n")
-	for i := 1; i < len(lines); i++ {
-		suffix := strings.Join(lines[i:], "\n")
-		if !usablePromptEchoSuffix(suffix) {
-			continue
-		}
-		if strings.HasPrefix(text, suffix) {
-			return strings.TrimLeft(text[len(suffix):], "\n"), true
-		}
-	}
 	return text, false
-}
-
-func usablePromptEchoSuffix(s string) bool {
-	if strings.Contains(s, "\n") {
-		return true
-	}
-	return utf8.RuneCountInString(strings.TrimSpace(s)) >= 8
 }
 
 func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) {

@@ -809,6 +809,100 @@ func TestServiceRefreshesBaselineBeforeDispatchingNewRequest(t *testing.T) {
 	}
 }
 
+func TestServiceCompletesWhenStatusSlotStaysEmpty(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"• Working (1s • esc to interrupt)\n  gpt-5.4 xhigh · 100% left · /srv/demo\n› ",
+			"• final reply\n  gpt-5.4 xhigh · 100% left · /srv/demo\n› ",
+			"• final reply\n  gpt-5.4 xhigh · 100% left · /srv/demo\n› ",
+			"• final reply\n\n› ",
+			"• final reply\n\n› ",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.completeAfter = time.Nanosecond
+
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		session:      svc.opts.SessionName,
+		sessionReady: true,
+		lastText:     "",
+	}
+
+	if err := svc.dispatchPrepared(rt, &activeRequest{
+		messageID: "om_1",
+		input:     "hello",
+	}); err != nil {
+		t.Fatalf("dispatchPrepared() error = %v", err)
+	}
+
+	svc.poll(rt) // busy marker on
+	if !rt.lastBusy {
+		t.Fatal("lastBusy = false after busy marker snapshot, want true")
+	}
+
+	svc.poll(rt) // marker gone but status slot still has text
+	if !rt.lastBusy {
+		t.Fatal("lastBusy = false while status slot not empty, want still busy")
+	}
+	if got := nonStatusMessages(messenger.all()); len(got) != 0 {
+		t.Fatalf("messages = %#v, want not flushed yet", got)
+	}
+
+	svc.poll(rt) // unchanged, still status text
+	if !rt.lastBusy {
+		t.Fatal("lastBusy = false while status slot not empty, want still busy")
+	}
+
+	svc.poll(rt) // first empty-slot observation
+	if rt.lastBusy == false {
+		t.Fatal("lastBusy = false on first empty-slot poll, want one more confirmation poll")
+	}
+
+	svc.poll(rt) // empty slot stable -> completion confirmed -> flush
+	if rt.lastBusy {
+		t.Fatal("lastBusy = true after empty status slot stabilization, want false")
+	}
+	if got := nonStatusMessages(messenger.all()); len(got) != 1 || got[0] != "• final reply" {
+		t.Fatalf("messages = %#v, want final reply flushed on completion", got)
+	}
+}
+
+func TestSuppressPromptEchoPrefixRequiresFullPrefixMatch(t *testing.T) {
+	t.Parallel()
+
+	text, consumed := suppressPromptEchoPrefix("line two\nline three\n\n• reply", "line two\nline three")
+	if !consumed {
+		t.Fatal("consumed = false, want true on exact full-prefix echo")
+	}
+	if got, want := text, "• reply"; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}
+
+func TestSuppressPromptEchoPrefixDoesNotStripSuffixOnlyMatch(t *testing.T) {
+	t.Parallel()
+
+	text, consumed := suppressPromptEchoPrefix("line three\n\n• reply", "line two\nline three")
+	if consumed {
+		t.Fatal("consumed = true, want false on suffix-only match")
+	}
+	if got, want := text, "line three\n\n• reply"; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}
+
 func TestServiceEditableMessengerEditsWorkingMessageIntoReply(t *testing.T) {
 	t.Parallel()
 
