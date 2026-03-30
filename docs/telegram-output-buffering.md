@@ -26,6 +26,7 @@
 | Flush trigger | Flush body after idle debounce, or sooner if buffered body text has been hidden for too long during a busy run |
 | Request boundary | Refresh the tmux output baseline immediately before dispatching a new prompt |
 | Before next user message dispatch | Force-flush any buffered body text first |
+| Capture/session recovery | Retain buffered body text across transient tmux capture/session failures and retry flush after reconnect |
 | Telegram length limit | When the active message approaches a soft limit, roll over to a new Telegram message |
 | Telegram API 429 | Respect `retry_after`; keep buffered body text and retry edit after backoff |
 
@@ -107,6 +108,7 @@ Current implementation uses internal constants for these values. YAML exposure i
 | Reply fits within one message | The initial `working` message is edited into the final body message |
 | Reply exceeds Telegram safe size | Telegram shows a small number of continuation messages, each maintained with edit-in-place until rollover |
 | Telegram returns `429 Too Many Requests` during edit | Buffered body is retained and next edit attempt waits at least `retry_after` seconds |
+| Tmux capture fails temporarily while body is buffered | Buffered body survives reconnect and is delivered before the next prompt dispatch |
 
 ## Follow-Ups
 

@@ -283,7 +283,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 			}
 		case <-ticker.C:
 			if !rt.sessionReady {
-				if len(rt.pending) == 0 {
+				if len(rt.pending) == 0 && !rt.hasBufferedOutput() {
 					continue
 				}
 				if err := s.ensureSession(rt); err != nil {
@@ -291,6 +291,9 @@ func (s *Service) runGroup(rt *groupRuntime) {
 					continue
 				}
 				s.keepLatestPending(rt)
+				if !rt.lastBusy && rt.hasBufferedOutput() {
+					s.flushOutputBuffer(rt)
+				}
 				if !rt.lastBusy && len(rt.pending) > 0 {
 					s.flushOutputBuffer(rt)
 					if !rt.hasBufferedOutput() {
@@ -308,6 +311,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	if rt.sessionReady {
 		return nil
 	}
+	recoveringOutput := rt.hasBufferedOutput() || strings.TrimSpace(rt.outputText) != "" || len(rt.outputMessages) > 0 || !rt.editBackoffUntil.IsZero()
 
 	_, err := s.console.EnsureSession(s.ctx, tmuxctl.SessionSpec{
 		SessionName:                 rt.session,
@@ -328,10 +332,12 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	rt.baseText = ""
 	rt.lastBusy = tmuxctl.IsBusy(snapshot)
 	rt.idleTicks = 0
-	rt.clearOutputBuffer()
-	rt.outputText = ""
-	rt.outputMessages = nil
-	rt.editBackoffUntil = time.Time{}
+	if !recoveringOutput {
+		rt.clearOutputBuffer()
+		rt.outputText = ""
+		rt.outputMessages = nil
+		rt.editBackoffUntil = time.Time{}
+	}
 	rt.busySince = time.Time{}
 	rt.workingSent = false
 	rt.lastActionAt = time.Time{}
@@ -435,10 +441,6 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.lastBusy = false
 		rt.idleTicks = 0
 		rt.lastText = ""
-		rt.clearOutputBuffer()
-		rt.outputText = ""
-		rt.outputMessages = nil
-		rt.editBackoffUntil = time.Time{}
 		rt.busySince = time.Time{}
 		rt.workingSent = false
 		rt.lastActionAt = time.Time{}
@@ -524,8 +526,10 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) {
 	}
 	currText = strings.Trim(currText, "\n")
 	if strings.TrimSpace(currText) == "" {
-		rt.clearOutputBuffer()
 		rt.outputText = ""
+		if !rt.hasBufferedOutput() {
+			rt.clearOutputBuffer()
+		}
 		return
 	}
 

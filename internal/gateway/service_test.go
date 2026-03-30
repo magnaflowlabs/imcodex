@@ -1312,6 +1312,70 @@ func TestServiceEditableMessengerResetsThreadWhenMessageToEditMissing(t *testing
 	}
 }
 
+func TestServicePreservesBufferedOutputAcrossCaptureFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• first chunk",
+			"• first chunk",
+		},
+		captureErrors: []error{
+			nil,
+			nil,
+			nil,
+			errors.New("tmux temporary failure"),
+			nil,
+			nil,
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 200
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "hello",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 800*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) >= 1 && strings.Contains(strings.Join(got, "\n"), "• first chunk")
+	})
+}
+
+func TestResetBufferedOutputKeepsPendingBufferWhenCurrentTextEmpty(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		outputBuffer:     "• tail not sent",
+		outputBufferedAt: time.Now(),
+		outputText:       "• previous synced",
+	}
+
+	svc.resetBufferedOutput(rt, "")
+
+	if got, want := rt.outputBuffer, "• tail not sent"; got != want {
+		t.Fatalf("outputBuffer = %q, want %q", got, want)
+	}
+	if !rt.outputBufferedAt.IsZero() && strings.TrimSpace(rt.outputBuffer) == "" {
+		t.Fatalf("outputBufferedAt=%v with empty buffer, want cleared together", rt.outputBufferedAt)
+	}
+}
+
 func TestServiceFlushesBufferedReplyBeforeDispatchingNextMessage(t *testing.T) {
 	t.Parallel()
 
