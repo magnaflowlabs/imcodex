@@ -85,3 +85,13 @@ func TestIsBusyHandlesTrailingPromptPlaceholder(t *testing.T) {
 		t.Fatal("IsBusy() = true, want false")
 	}
 }
+
+func TestNormalizeSnapshotKeepsModelLikeContentLines(t *testing.T) {
+	t.Parallel()
+
+	raw := "model: gpt-5.4\n\ndirectory: /srv/demo\n\nchatgpt.com/codex\n\ncommunity.openai.com"
+	got := NormalizeSnapshot(raw)
+	if got != raw {
+		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, raw)
+	}
+}

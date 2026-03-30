@@ -121,8 +121,6 @@ func shouldIgnoreLine(line string) bool {
 		strings.HasPrefix(line, "│"),
 		strings.HasPrefix(line, "╰"),
 		strings.HasPrefix(line, "Tip:"),
-		strings.HasPrefix(line, "model:"),
-		strings.HasPrefix(line, "directory:"),
 		strings.HasPrefix(line, "Do you trust the contents of this directory?"),
 		strings.HasPrefix(line, "comes with higher risk of prompt injection."),
 		strings.HasPrefix(line, "1. Yes, continue"),
@@ -130,9 +128,7 @@ func shouldIgnoreLine(line string) bool {
 		strings.HasPrefix(line, "Press enter to continue"),
 		strings.HasPrefix(line, "›"):
 		return true
-	case strings.Contains(line, "chatgpt.com/codex"),
-		strings.Contains(line, "community.openai.com"),
-		strings.Contains(line, "% left ·"),
+	case strings.Contains(line, "% left ·"),
 		strings.Contains(line, "esc to interrupt"):
 		return true
 	default:
