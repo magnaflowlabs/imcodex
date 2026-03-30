@@ -25,7 +25,7 @@
 | Body flush | Use a longer debounce for idle completion, plus a maximum visible delay while Codex is still busy |
 | Flush trigger | Flush body after idle debounce, or sooner if buffered body text has been hidden for too long during a busy run |
 | Request boundary | Refresh the tmux output baseline immediately before dispatching a new prompt |
-| Before next user message dispatch | Force-flush any buffered body text first |
+| Before next user message dispatch | Try flush first; if edit path is blocked (backoff/edit-invalid), detach unsent tail to send queue and dispatch next prompt immediately |
 | Capture/session recovery | Retain buffered body text across transient tmux capture/session failures and retry flush after reconnect |
 | Telegram length limit | When the active message approaches a soft limit, roll over to a new Telegram message |
 | Telegram API 429 | Respect `retry_after`; keep buffered body text and retry edit after backoff |
@@ -41,6 +41,7 @@
 | Codex becomes idle | Flush buffered reply text immediately on busy→idle transition (idle debounce remains as a fallback path) |
 | Active message nears Telegram limit | Finalize the current message and create a new continuation message, then continue editing the new one |
 | New user prompt arrives while previous reply text is buffered | Flush buffered text first, then dispatch the new prompt |
+| Edit path stays blocked while next prompt arrives | New prompt still dispatches immediately; unsent tail is sent asynchronously from detached queue |
 
 ## Proposed Timing
 
@@ -65,6 +66,7 @@
 | 6 | If the merged text would exceed `edit_rollover_at`, keep the current message as-is, send a new continuation message, and continue edits there |
 | 7 | If a new user prompt arrives before the buffered text is flushed, flush first, then dispatch the new prompt |
 | 8 | Right before dispatch, refresh the tmux baseline so the next reply cannot replay stale tail output from the prior run |
+| 9 | If editable flush cannot complete at the boundary (for example retry-backoff or stale editable message), detach the unsent tail into a plain send queue and continue dispatch without blocking |
 
 ## Rationale
 

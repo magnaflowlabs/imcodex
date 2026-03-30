@@ -128,6 +128,7 @@ type groupRuntime struct {
 	outputBufferedAt   time.Time
 	outputText         string
 	outputMessages     []trackedMessage
+	detachedOutputs    []string
 	editBackoffUntil   time.Time
 	busySince          time.Time
 	workingSent        bool
@@ -272,16 +273,15 @@ func (s *Service) runGroup(rt *groupRuntime) {
 			if !wasReady {
 				s.keepLatestPending(rt)
 			}
+			s.flushDetachedOutputs(rt)
 			if s.opts.InterruptOnNewMessage && rt.lastBusy && len(rt.pending) > 0 {
 				s.requestInterrupt(rt)
 			}
 			if !rt.lastBusy && len(rt.pending) > 0 {
-				s.flushOutputBuffer(rt)
-				if !rt.hasBufferedOutput() {
-					s.dispatchNext(rt)
-				}
+				s.dispatchNext(rt)
 			}
 		case <-ticker.C:
+			s.flushDetachedOutputs(rt)
 			if !rt.sessionReady {
 				if len(rt.pending) == 0 && !rt.hasBufferedOutput() {
 					continue
@@ -295,10 +295,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 					s.flushOutputBuffer(rt)
 				}
 				if !rt.lastBusy && len(rt.pending) > 0 {
-					s.flushOutputBuffer(rt)
-					if !rt.hasBufferedOutput() {
-						s.dispatchNext(rt)
-					}
+					s.dispatchNext(rt)
 				}
 				continue
 			}
@@ -352,6 +349,11 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 	if len(rt.pending) == 0 {
 		return
 	}
+	s.finalizeOutputBeforeDispatch(rt)
+	s.flushOutputBuffer(rt)
+	if rt.hasBufferedOutput() {
+		s.detachBufferedOutput(rt)
+	}
 
 	msg := rt.pending[0]
 	rt.pending = rt.pending[1:]
@@ -390,6 +392,39 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.active = nil
 		return
 	}
+}
+
+func (s *Service) finalizeOutputBeforeDispatch(rt *groupRuntime) {
+	if rt == nil || !rt.sessionReady || strings.TrimSpace(rt.session) == "" {
+		return
+	}
+	// Only run boundary finalization when there is existing reply state to reconcile.
+	// This avoids consuming fresh run snapshots before the very first dispatch.
+	if !rt.hasBufferedOutput() && strings.TrimSpace(rt.outputText) == "" && len(rt.outputMessages) == 0 {
+		return
+	}
+	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
+	if err != nil {
+		s.logger.Warn("capture finalize output failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
+		return
+	}
+	currFullText := tmuxctl.NormalizeSnapshot(snapshot)
+	rt.lastText = currFullText
+	if tmuxctl.IsBusy(snapshot) {
+		return
+	}
+	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
+	currText = strings.Trim(currText, "\n")
+	if strings.TrimSpace(currText) == "" {
+		return
+	}
+	knownText := mergeBufferedOutput(rt.outputText, rt.outputBuffer)
+	delta, reset := tmuxctl.DiffText(knownText, currText)
+	if reset {
+		s.resetBufferedOutput(rt, currText)
+		return
+	}
+	rt.appendOutputBuffer(delta, time.Now())
 }
 
 func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
@@ -500,10 +535,7 @@ func (s *Service) poll(rt *groupRuntime) {
 	}
 
 	if !busy && len(rt.pending) > 0 {
-		s.flushOutputBuffer(rt)
-		if !rt.hasBufferedOutput() {
-			s.dispatchNext(rt)
-		}
+		s.dispatchNext(rt)
 	}
 }
 
@@ -755,9 +787,21 @@ func (s *Service) sendChunked(groupID string, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	for _, chunk := range splitByRunes(text, maxMessageRunes) {
-		s.sendBestEffort(groupID, chunk)
+	if err := s.sendChunkedStrict(groupID, text); err != nil {
+		s.logger.Error("send chunked message failed", "group_id", groupID, "err", err)
 	}
+}
+
+func (s *Service) sendChunkedStrict(groupID string, text string) error {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	for _, chunk := range splitByRunes(text, maxMessageRunes) {
+		if err := s.messenger.SendTextToChat(context.Background(), groupID, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) editableMessenger() EditableMessenger {
@@ -780,6 +824,25 @@ func (s *Service) prepareOutputForDispatch(rt *groupRuntime) {
 		return
 	}
 	rt.outputMessages = nil
+}
+
+func (s *Service) detachBufferedOutput(rt *groupRuntime) {
+	if rt == nil {
+		return
+	}
+	candidate := mergeBufferedOutput(rt.outputText, rt.outputBuffer)
+	unsent := candidate
+	if strings.HasPrefix(candidate, rt.outputText) {
+		unsent = candidate[len(rt.outputText):]
+	}
+	unsent = strings.Trim(unsent, "\n")
+	if strings.TrimSpace(unsent) != "" {
+		rt.enqueueDetachedOutput(unsent)
+	}
+	rt.clearOutputBuffer()
+	rt.outputText = ""
+	rt.outputMessages = nil
+	rt.editBackoffUntil = time.Time{}
 }
 
 func (s *Service) sendWorkingStatus(rt *groupRuntime) {
@@ -1050,6 +1113,29 @@ func (rt *groupRuntime) hasBufferedOutput() bool {
 		return false
 	}
 	return strings.TrimSpace(rt.outputBuffer) != ""
+}
+
+func (rt *groupRuntime) enqueueDetachedOutput(text string) {
+	if rt == nil {
+		return
+	}
+	text = strings.Trim(text, "\n")
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	rt.detachedOutputs = append(rt.detachedOutputs, text)
+}
+
+func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
+	if rt == nil || len(rt.detachedOutputs) == 0 {
+		return
+	}
+	text := rt.detachedOutputs[0]
+	if err := s.sendChunkedStrict(rt.opts.GroupID, text); err != nil {
+		s.logger.Warn("flush detached output failed", "group_id", rt.opts.GroupID, "err", err)
+		return
+	}
+	rt.detachedOutputs = rt.detachedOutputs[1:]
 }
 
 func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenger, desiredText string) error {

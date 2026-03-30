@@ -1156,7 +1156,7 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 	}
 }
 
-func TestServiceDelaysNextDispatchWhileEditableOutputBackedOff(t *testing.T) {
+func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1205,17 +1205,20 @@ func TestServiceDelaysNextDispatchWhileEditableOutputBackedOff(t *testing.T) {
 		t.Fatalf("HandleMessage(second) error = %v", err)
 	}
 
-	time.Sleep(200 * time.Millisecond)
-	if got := len(console.allSendTexts()); got != 1 {
-		t.Fatalf("len(sendTexts) during backoff = %d, want 1 (delay second dispatch)", got)
-	}
-
-	waitFor(t, 2*time.Second, func() bool {
+	waitFor(t, 500*time.Millisecond, func() bool {
 		return len(console.allSendTexts()) >= 2
 	})
 	sendTexts := console.allSendTexts()
 	if got, want := sendTexts[1], "second"; got != want {
-		t.Fatalf("sendTexts[1] = %q, want %q after backoff flush", got, want)
+		t.Fatalf("sendTexts[1] = %q, want %q while prior output is backed off", got, want)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) >= 1 && strings.Contains(strings.Join(got, "\n"), "• first")
+	})
+	if got := nonStatusMessages(messenger.all()); len(got) == 0 {
+		t.Fatalf("messages = %#v, want detached first output delivered", got)
 	}
 }
 
@@ -1439,6 +1442,52 @@ func TestServiceFlushesBufferedReplyBeforeDispatchingNextMessage(t *testing.T) {
 	}
 	if got := console.allSendTexts()[1]; got != "second" {
 		t.Fatalf("sendTexts[1] = %q, want second prompt dispatched", got)
+	}
+}
+
+func TestServiceDispatchNextFinalizesTailBeforeNextPrompt(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"• first reply\n\n• tail reply",
+			"• first reply\n\n• tail reply",
+		},
+	}
+	messenger := &fakeEditableMessenger{
+		nextID: 1,
+		messages: []trackedMessage{
+			{messageID: "1", text: "• first reply"},
+		},
+	}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		session:      svc.opts.SessionName,
+		sessionReady: true,
+		baseText:     "",
+		lastText:     "• first reply",
+		outputText:   "• first reply",
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• first reply"},
+		},
+		pending: []IncomingMessage{
+			{MessageID: "om_2", GroupID: "oc_1", Text: "second"},
+		},
+	}
+
+	svc.dispatchNext(rt)
+
+	if got := nonStatusMessages(messenger.all()); len(got) != 1 || got[0] != "• first reply\n\n• tail reply" {
+		t.Fatalf("messages = %#v, want finalized tail before next dispatch", got)
+	}
+	sendTexts := console.allSendTexts()
+	if len(sendTexts) != 1 || sendTexts[0] != "second" {
+		t.Fatalf("sendTexts = %#v, want second prompt dispatched after tail finalize", sendTexts)
 	}
 }
 

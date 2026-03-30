@@ -211,7 +211,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 1.1.4 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 1.1.5 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior
@@ -224,6 +224,7 @@ imcodex 1.1.4 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 j
 | Images / files | Downloaded into `cwd/.imcodex/inbox/`, then forwarded as a short text prompt with the saved path |
 | Telegram live output | Sends periodic typing actions while the first visible reply is pending, posts one early working status, then edits an active message after a short idle debounce |
 | Telegram edit rate limit | If Telegram returns `429` on `editMessageText`, buffered text is preserved and retried after `retry_after` backoff |
+| New prompt while prior tail is blocked on edit/backoff | New prompt dispatch proceeds immediately; unsent prior tail is detached to an internal send queue and delivered asynchronously |
 | Tmux capture/session transient failure | Pending buffered output is retained and retried after reconnect before dispatching the next prompt |
 | New message while main session is busy | Interrupts the current run and keeps only the newest pending message by default |
 | Job execution | Posts only the final result, not live incremental output |
