@@ -17,13 +17,23 @@ import (
 )
 
 type fakeMessenger struct {
-	mu    sync.Mutex
-	texts []string
+	mu       sync.Mutex
+	texts    []string
+	sendErrs []error
 }
 
 func (f *fakeMessenger) SendTextToChat(_ context.Context, _ string, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.sendErrs) > 0 {
+		err := f.sendErrs[0]
+		if len(f.sendErrs) > 1 {
+			f.sendErrs = f.sendErrs[1:]
+		}
+		if err != nil {
+			return err
+		}
+	}
 	f.texts = append(f.texts, text)
 	return nil
 }
@@ -888,6 +898,46 @@ func TestServiceEditableMessengerRollsOverLongReply(t *testing.T) {
 	}
 }
 
+func TestServiceEditableMessengerFlushesImmediatelyOnRolloverThreshold(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const reply = "abcdefghijklmnop"
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			reply + "\n\n• Working (2s • esc to interrupt)",
+			reply + "\n\n• Working (3s • esc to interrupt)",
+		},
+	}
+	messenger := &fakeEditableMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.workingAfter = 5 * time.Millisecond
+	svc.busyFlushAfter = time.Hour
+	svc.flushIdleTicks = 200
+	svc.editRolloverAt = 10
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "long reply",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 2 && got[0] == "abcdefghij" && got[1] == "klmnop"
+	})
+}
+
 func TestServiceEditableMessengerKeepsPreviousReplyWhenNewRequestStarts(t *testing.T) {
 	t.Parallel()
 
@@ -1222,6 +1272,53 @@ func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 	}
 }
 
+func TestServiceDetachedOutputRetriesChunkWithoutReplay(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeMessenger{
+		sendErrs: []error{
+			nil,
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 1 retry_after=1"),
+			nil,
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts: svc.opts,
+	}
+
+	original := strings.Repeat("x", maxMessageRunes+16)
+	rt.enqueueDetachedOutput(original)
+	if got, want := len(rt.detachedOutputs), 2; got != want {
+		t.Fatalf("len(detachedOutputs) = %d, want %d chunked detached queue", got, want)
+	}
+
+	svc.flushDetachedOutputs(rt)
+	firstPass := messenger.all()
+	if got, want := len(firstPass), 1; got != want {
+		t.Fatalf("len(messages) after first pass = %d, want %d", got, want)
+	}
+	if got, want := len(rt.detachedOutputs), 1; got != want {
+		t.Fatalf("len(detachedOutputs) after 429 = %d, want %d pending chunk", got, want)
+	}
+
+	svc.flushDetachedOutputs(rt)
+	if got, want := len(messenger.all()), 1; got != want {
+		t.Fatalf("len(messages) during retry_after backoff = %d, want %d (no replay)", got, want)
+	}
+
+	rt.detachedBackoffUntil = time.Time{}
+	svc.flushDetachedOutputs(rt)
+
+	final := messenger.all()
+	if got, want := len(final), 2; got != want {
+		t.Fatalf("len(messages) after retry = %d, want %d", got, want)
+	}
+	if got := final[0] + final[1]; got != original {
+		t.Fatalf("reassembled output = %q, want exact original text", got)
+	}
+}
+
 func TestServiceEditableMessengerDoesNotRetryWhenMessageNotModified(t *testing.T) {
 	t.Parallel()
 
@@ -1265,6 +1362,69 @@ func TestServiceEditableMessengerDoesNotRetryWhenMessageNotModified(t *testing.T
 	time.Sleep(200 * time.Millisecond)
 	if got := messenger.editCount(); got != 1 {
 		t.Fatalf("editCount = %d, want 1 without retry loop on message-not-modified", got)
+	}
+}
+
+func TestServicePollSkipsUnarmedOutputAndDisarmsAfterFinalFlush(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"• stale one\n• stale two",
+			"• stale one\n• stale two",
+			"• stale one\n• stale two\n• fresh reply",
+			"• stale one\n• stale two\n• fresh reply",
+			"• stale one\n• stale two\n• fresh reply\n• unsolicited",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.flushIdleTicks = 1
+
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		session:      svc.opts.SessionName,
+		sessionReady: true,
+		lastText:     "• stale one",
+		outputArmed:  false,
+	}
+
+	svc.poll(rt)
+	if got := nonStatusMessages(messenger.all()); len(got) != 0 {
+		t.Fatalf("messages before first dispatch = %#v, want ignored stale output", got)
+	}
+
+	if err := svc.dispatchPrepared(rt, &activeRequest{
+		messageID: "om_1",
+		input:     "hello",
+	}); err != nil {
+		t.Fatalf("dispatchPrepared() error = %v", err)
+	}
+	svc.poll(rt)
+
+	got := nonStatusMessages(messenger.all())
+	if len(got) != 1 || got[0] != "• fresh reply" {
+		t.Fatalf("messages after armed poll = %#v, want only fresh delta", got)
+	}
+	if !rt.outputArmed {
+		t.Fatalf("outputArmed = false, want still armed until idle-stable poll")
+	}
+
+	svc.poll(rt)
+	if rt.outputArmed {
+		t.Fatalf("outputArmed = true, want auto-disarmed after idle-stable poll")
+	}
+	if got := nonStatusMessages(messenger.all()); len(got) != 1 {
+		t.Fatalf("messages during disarm poll = %#v, want no new output", got)
+	}
+
+	svc.poll(rt)
+	if got := nonStatusMessages(messenger.all()); len(got) != 1 {
+		t.Fatalf("messages after disarm = %#v, want no unsolicited forwarding", got)
 	}
 }
 

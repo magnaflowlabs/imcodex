@@ -21,6 +21,7 @@ const (
 	maxMessageRunes        = 3000
 	queueSize              = 64
 	recentMessageIDLimit   = 256
+	maxDetachedSendRetries = 3
 	defaultFlushIdleTicks  = 8
 	defaultWorkingAfter    = time.Second
 	defaultChatActionEvery = 4 * time.Second
@@ -114,27 +115,30 @@ type activeRequest struct {
 }
 
 type groupRuntime struct {
-	opts               Options
-	session            string
-	queue              chan IncomingMessage
-	pending            []IncomingMessage
-	active             *activeRequest
-	sessionReady       bool
-	lastText           string
-	baseText           string
-	lastBusy           bool
-	idleTicks          int
-	outputBuffer       string
-	outputBufferedAt   time.Time
-	outputText         string
-	outputMessages     []trackedMessage
-	detachedOutputs    []string
-	editBackoffUntil   time.Time
-	busySince          time.Time
-	workingSent        bool
-	lastActionAt       time.Time
-	interruptSentAt    time.Time
-	forceInterruptSent bool
+	opts                 Options
+	session              string
+	queue                chan IncomingMessage
+	pending              []IncomingMessage
+	active               *activeRequest
+	outputArmed          bool
+	sessionReady         bool
+	lastText             string
+	baseText             string
+	lastBusy             bool
+	idleTicks            int
+	outputBuffer         string
+	outputBufferedAt     time.Time
+	outputText           string
+	outputMessages       []trackedMessage
+	detachedOutputs      []string
+	detachedBackoffUntil time.Time
+	detachedRetryCount   int
+	editBackoffUntil     time.Time
+	busySince            time.Time
+	workingSent          bool
+	lastActionAt         time.Time
+	interruptSentAt      time.Time
+	forceInterruptSent   bool
 }
 
 type trackedMessage struct {
@@ -308,7 +312,13 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	if rt.sessionReady {
 		return nil
 	}
-	recoveringOutput := rt.hasBufferedOutput() || strings.TrimSpace(rt.outputText) != "" || len(rt.outputMessages) > 0 || !rt.editBackoffUntil.IsZero()
+	recoveringOutput := rt.outputArmed ||
+		rt.hasBufferedOutput() ||
+		strings.TrimSpace(rt.outputText) != "" ||
+		len(rt.outputMessages) > 0 ||
+		len(rt.detachedOutputs) > 0 ||
+		!rt.detachedBackoffUntil.IsZero() ||
+		!rt.editBackoffUntil.IsZero()
 
 	_, err := s.console.EnsureSession(s.ctx, tmuxctl.SessionSpec{
 		SessionName:                 rt.session,
@@ -333,8 +343,11 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.clearOutputBuffer()
 		rt.outputText = ""
 		rt.outputMessages = nil
+		rt.detachedBackoffUntil = time.Time{}
+		rt.detachedRetryCount = 0
 		rt.editBackoffUntil = time.Time{}
 	}
+	rt.outputArmed = recoveringOutput
 	rt.busySince = time.Time{}
 	rt.workingSent = false
 	rt.lastActionAt = time.Time{}
@@ -380,9 +393,13 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.lastBusy = false
 		rt.idleTicks = 0
 		rt.lastText = ""
+		rt.outputArmed = false
 		rt.clearOutputBuffer()
 		rt.outputText = ""
 		rt.outputMessages = nil
+		rt.detachedOutputs = nil
+		rt.detachedBackoffUntil = time.Time{}
+		rt.detachedRetryCount = 0
 		rt.editBackoffUntil = time.Time{}
 		rt.busySince = time.Time{}
 		rt.workingSent = false
@@ -439,6 +456,7 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	rt.baseText = baseline
 	rt.lastBusy = true
 	rt.idleTicks = 0
+	rt.outputArmed = true
 	rt.clearOutputBuffer()
 	rt.outputText = ""
 	rt.editBackoffUntil = time.Time{}
@@ -513,14 +531,18 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.idleTicks++
 	}
 
-	rt.appendOutputBuffer(delta, time.Now())
-	if reset {
-		s.resetBufferedOutput(rt, currText)
-	}
-	if becameIdle && strings.TrimSpace(rt.outputBuffer) != "" && s.editableMessenger() != nil {
-		s.flushOutputBuffer(rt)
-	} else if shouldFlush(rt.outputBuffer, rt.outputBufferedAt, busy, rt.idleTicks, s.flushIdleTicks, s.busyFlushAfter, time.Now()) {
-		s.flushOutputBuffer(rt)
+	if rt.outputArmed {
+		rt.appendOutputBuffer(delta, time.Now())
+		if reset {
+			s.resetBufferedOutput(rt, currText)
+		}
+		if shouldFlushOnSize(rt, s.editRolloverAt, maxMessageRunes) {
+			s.flushOutputBuffer(rt)
+		} else if becameIdle && strings.TrimSpace(rt.outputBuffer) != "" && s.editableMessenger() != nil {
+			s.flushOutputBuffer(rt)
+		} else if shouldFlush(rt.outputBuffer, rt.outputBufferedAt, busy, rt.idleTicks, s.flushIdleTicks, s.busyFlushAfter, time.Now()) {
+			s.flushOutputBuffer(rt)
+		}
 	}
 
 	rt.lastText = currFullText
@@ -532,6 +554,13 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.interruptSentAt = time.Time{}
 		rt.forceInterruptSent = false
 		rt.active = nil
+		disarmIdleTicks := s.flushIdleTicks
+		if disarmIdleTicks <= 0 {
+			disarmIdleTicks = 1
+		}
+		if rt.canDisarmOutput() && rt.idleTicks >= disarmIdleTicks && strings.TrimSpace(delta) == "" && !reset {
+			rt.outputArmed = false
+		}
 	}
 
 	if !busy && len(rt.pending) > 0 {
@@ -550,6 +579,24 @@ func shouldFlush(buffer string, bufferedAt time.Time, busy bool, idleTicks int, 
 		flushIdleTicks = 1
 	}
 	return idleTicks >= flushIdleTicks
+}
+
+func shouldFlushOnSize(rt *groupRuntime, softLimit int, hardLimit int) bool {
+	if rt == nil || strings.TrimSpace(rt.outputBuffer) == "" {
+		return false
+	}
+	limit := softLimit
+	if limit <= 0 || (hardLimit > 0 && limit > hardLimit) {
+		limit = hardLimit
+	}
+	if limit <= 0 {
+		limit = maxMessageRunes
+	}
+	candidate := strings.Trim(rt.outputText+rt.outputBuffer, "\n")
+	if strings.TrimSpace(candidate) == "" {
+		return false
+	}
+	return utf8.RuneCountInString(candidate) >= limit
 }
 
 func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) {
@@ -843,6 +890,7 @@ func (s *Service) detachBufferedOutput(rt *groupRuntime) {
 	rt.outputText = ""
 	rt.outputMessages = nil
 	rt.editBackoffUntil = time.Time{}
+	rt.detachedRetryCount = 0
 }
 
 func (s *Service) sendWorkingStatus(rt *groupRuntime) {
@@ -1123,19 +1171,103 @@ func (rt *groupRuntime) enqueueDetachedOutput(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	rt.detachedOutputs = append(rt.detachedOutputs, text)
+	for _, chunk := range splitByRunes(text, maxMessageRunes) {
+		chunk = strings.Trim(chunk, "\n")
+		if strings.TrimSpace(chunk) == "" {
+			continue
+		}
+		rt.detachedOutputs = append(rt.detachedOutputs, chunk)
+	}
 }
 
 func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 	if rt == nil || len(rt.detachedOutputs) == 0 {
 		return
 	}
-	text := rt.detachedOutputs[0]
-	if err := s.sendChunkedStrict(rt.opts.GroupID, text); err != nil {
-		s.logger.Warn("flush detached output failed", "group_id", rt.opts.GroupID, "err", err)
-		return
+	now := time.Now()
+	if !rt.detachedBackoffUntil.IsZero() {
+		if rt.detachedBackoffUntil.After(now) {
+			return
+		}
+		rt.detachedBackoffUntil = time.Time{}
 	}
-	rt.detachedOutputs = rt.detachedOutputs[1:]
+
+	for len(rt.detachedOutputs) > 0 {
+		text := rt.detachedOutputs[0]
+		if err := s.messenger.SendTextToChat(context.Background(), rt.opts.GroupID, text); err != nil {
+			retryAfter := retryAfterFromRateLimitError(err)
+			if retryAfter > 0 {
+				rt.detachedBackoffUntil = time.Now().Add(retryAfter)
+				rt.detachedRetryCount = 0
+				s.logger.Warn(
+					"flush detached output rate-limited",
+					"group_id",
+					rt.opts.GroupID,
+					"retry_after",
+					retryAfter.String(),
+					"retry_at",
+					rt.detachedBackoffUntil,
+					"err",
+					err,
+				)
+				return
+			}
+			rt.detachedRetryCount++
+			if rt.detachedRetryCount >= maxDetachedSendRetries {
+				s.logger.Error(
+					"drop detached output chunk after retries",
+					"group_id",
+					rt.opts.GroupID,
+					"attempts",
+					rt.detachedRetryCount,
+					"err",
+					err,
+				)
+				s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("Failed to deliver buffered output chunk after %d attempts: %v", rt.detachedRetryCount, err))
+				rt.detachedOutputs = rt.detachedOutputs[1:]
+				rt.detachedBackoffUntil = time.Time{}
+				rt.detachedRetryCount = 0
+				continue
+			}
+			retryAfter = time.Duration(rt.detachedRetryCount) * time.Second
+			rt.detachedBackoffUntil = time.Now().Add(retryAfter)
+			s.logger.Warn(
+				"flush detached output failed",
+				"group_id",
+				rt.opts.GroupID,
+				"attempt",
+				rt.detachedRetryCount,
+				"retry_after",
+				retryAfter.String(),
+				"retry_at",
+				rt.detachedBackoffUntil,
+				"err",
+				err,
+			)
+			return
+		}
+		rt.detachedOutputs = rt.detachedOutputs[1:]
+		rt.detachedRetryCount = 0
+	}
+}
+
+func (rt *groupRuntime) canDisarmOutput() bool {
+	if rt == nil {
+		return true
+	}
+	if rt.lastBusy || rt.active != nil {
+		return false
+	}
+	if len(rt.pending) > 0 {
+		return false
+	}
+	if rt.hasBufferedOutput() || len(rt.detachedOutputs) > 0 {
+		return false
+	}
+	if !rt.detachedBackoffUntil.IsZero() || !rt.editBackoffUntil.IsZero() {
+		return false
+	}
+	return true
 }
 
 func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenger, desiredText string) error {
