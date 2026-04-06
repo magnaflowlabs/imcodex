@@ -162,6 +162,7 @@ type fakeConsole struct {
 	captures      []string
 	captureErrors []error
 	sendTexts     []string
+	ensureSpecs   []tmuxctl.SessionSpec
 	interrupts    []string
 	ensureErrors  []error
 	sendErrors    []error
@@ -169,7 +170,7 @@ type fakeConsole struct {
 	ensureBlock   <-chan struct{}
 }
 
-func (f *fakeConsole) EnsureSession(context.Context, tmuxctl.SessionSpec) (bool, error) {
+func (f *fakeConsole) EnsureSession(_ context.Context, spec tmuxctl.SessionSpec) (bool, error) {
 	if f.ensureEntered != nil {
 		select {
 		case f.ensureEntered <- struct{}{}:
@@ -181,6 +182,7 @@ func (f *fakeConsole) EnsureSession(context.Context, tmuxctl.SessionSpec) (bool,
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ensureSpecs = append(f.ensureSpecs, spec)
 	if len(f.ensureErrors) > 0 {
 		err := f.ensureErrors[0]
 		if len(f.ensureErrors) > 1 {
@@ -191,6 +193,14 @@ func (f *fakeConsole) EnsureSession(context.Context, tmuxctl.SessionSpec) (bool,
 		}
 	}
 	return true, nil
+}
+
+func (f *fakeConsole) ensured() []tmuxctl.SessionSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]tmuxctl.SessionSpec, len(f.ensureSpecs))
+	copy(out, f.ensureSpecs)
+	return out
 }
 
 func (f *fakeConsole) SendText(_ context.Context, _ string, text string) error {
@@ -796,6 +806,34 @@ func TestServiceDoesNotForwardMultilinePromptEchoTail(t *testing.T) {
 	}
 	if !strings.Contains(joined, "• final reply") {
 		t.Fatalf("messages = %#v, want final reply forwarded", messenger.all())
+	}
+}
+
+func TestServiceEnsureSessionPassesLaunchOverride(t *testing.T) {
+	t.Parallel()
+
+	console := &fakeConsole{captures: []string{""}}
+	svc := NewService(context.Background(), Options{
+		GroupID:        "oc_1",
+		CWD:            "/srv/demo",
+		SessionName:    "imcodex-demo",
+		SessionCommand: "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude",
+	}, &fakeMessenger{}, console, nil, slog.Default())
+
+	rt := svc.ensureRuntime()
+	if err := svc.ensureSession(rt); err != nil {
+		t.Fatalf("ensureSession() error = %v", err)
+	}
+
+	specs := console.ensured()
+	if len(specs) != 1 {
+		t.Fatalf("len(ensureSpecs) = %d, want 1", len(specs))
+	}
+	if got, want := specs[0].LaunchCommand, "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude"; got != want {
+		t.Fatalf("LaunchCommand = %q, want %q", got, want)
+	}
+	if got, want := specs[0].GroupID, "oc_1"; got != want {
+		t.Fatalf("GroupID = %q, want %q", got, want)
 	}
 }
 

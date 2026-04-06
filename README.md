@@ -211,7 +211,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 1.1.14 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 2.0.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior
@@ -236,6 +236,13 @@ imcodex 1.1.14 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 
 | Restart | Reuses existing `tmux` sessions when they still exist |
 
 Current Telegram defaults are internal constants: `working` after about `1s`, partial body refresh at most every `15s` while Codex is still busy, idle flush after `24` polling ticks (`~12s` at 500ms polling), output watchdog around `8s`, detached-queue watchdog around `15s`, and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
+
+For the planned 2.0 runtime design that keeps host `tmux` while moving Codex
+or Claude execution into a workspace-confined Docker runtime, see
+[docs/runtime-v2-docker-tmux.md](docs/runtime-v2-docker-tmux.md). Existing
+1.x configs remain valid; the new session runtime fields are optional. Example
+wrapper and Docker image assets live in
+[docs/runtime-v2-examples.md](docs/runtime-v2-examples.md).
 
 ## Inspect Sessions
 

@@ -18,10 +18,16 @@ interrupt_on_new_message: true
 groups:
   - group_id: oc_xxx_primary
     cwd: /srv/my-project
+    # Optional 2.0 overrides:
+    # session_name: imcodex-my-project
+    # session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
     jobs:
       - name: hourly_review
         schedule: "1 * * * *"
         prompt_file: ./prompts/hourly_review.md
+        # Optional 2.0 overrides for prompt_file sessions:
+        # session_name: imcodex-job-my-project-hourly-review
+        # session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
       - name: hl_stack_cycle
         schedule: "6 * * * *"
         # Optional:

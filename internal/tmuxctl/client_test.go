@@ -125,6 +125,21 @@ func TestDefaultLaunchCommandUsesNeverApprovalAndDangerFullAccess(t *testing.T) 
 	}
 }
 
+func TestExpandLaunchCommandTemplate(t *testing.T) {
+	t.Parallel()
+
+	got := expandLaunchCommandTemplate("/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --group '{group_id}' --job '{job_name}'", SessionSpec{
+		SessionName: "demo-session",
+		CWD:         "/srv/demo",
+		GroupID:     "oc_1",
+		JobName:     "hourly_review",
+	})
+	want := "/usr/local/bin/imcodex-agent-run --workspace '/srv/demo' --session 'demo-session' --group 'oc_1' --job 'hourly_review'"
+	if got != want {
+		t.Fatalf("expandLaunchCommandTemplate() = %q, want %q", got, want)
+	}
+}
+
 func TestClientSendTextUsesBracketedPaste(t *testing.T) {
 	t.Parallel()
 
@@ -237,6 +252,70 @@ func TestEnsureSessionRejectsMissingWorkingDirectory(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "working directory does not exist") {
 		t.Fatalf("EnsureSession() error = %v, want missing working directory", err)
+	}
+}
+
+func TestSetControlPaneMarksPaneRole(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	scriptPath := filepath.Join(dir, "tmux")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+case "$1" in
+  set-option)
+    exit 0
+    ;;
+esac
+`, shellQuote(logPath))
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	client := New()
+	client.bin = scriptPath
+	if err := client.setControlPane(context.Background(), "demo", "%42"); err != nil {
+		t.Fatalf("setControlPane() error = %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "set-option -q -t demo @imcodex-control-pane %42") {
+		t.Fatalf("tmux log = %q, want session control pane option", logText)
+	}
+	if !strings.Contains(logText, "set-option -p -t %42 @imcodex-pane-role control") {
+		t.Fatalf("tmux log = %q, want pane role marker", logText)
+	}
+}
+
+func TestFindExistingControlPanePrefersPaneRoleMarker(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+case "$1" in
+  list-panes)
+    printf '%%10\tcontrol\tdocker\n%%11\t\tbash\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	client := New()
+	client.bin = scriptPath
+	got, err := client.findExistingControlPane(context.Background(), "demo", false)
+	if err != nil {
+		t.Fatalf("findExistingControlPane() error = %v", err)
+	}
+	if got != "%10" {
+		t.Fatalf("findExistingControlPane() = %q, want %%10", got)
 	}
 }
 

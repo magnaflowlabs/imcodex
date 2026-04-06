@@ -34,18 +34,22 @@ type config struct {
 }
 
 type groupConfig struct {
-	GroupID string      `yaml:"group_id"`
-	CWD     string      `yaml:"cwd"`
-	Jobs    []jobConfig `yaml:"jobs"`
+	GroupID        string      `yaml:"group_id"`
+	CWD            string      `yaml:"cwd"`
+	SessionName    string      `yaml:"session_name"`
+	SessionCommand string      `yaml:"session_command"`
+	Jobs           []jobConfig `yaml:"jobs"`
 }
 
 type jobConfig struct {
-	Name         string `yaml:"name"`
-	Schedule     string `yaml:"schedule"`
-	PromptFile   string `yaml:"prompt_file"`
-	Command      string `yaml:"command"`
-	ArtifactsDir string `yaml:"artifacts_dir"`
-	SummaryFile  string `yaml:"summary_file"`
+	Name           string `yaml:"name"`
+	Schedule       string `yaml:"schedule"`
+	PromptFile     string `yaml:"prompt_file"`
+	Command        string `yaml:"command"`
+	ArtifactsDir   string `yaml:"artifacts_dir"`
+	SummaryFile    string `yaml:"summary_file"`
+	SessionName    string `yaml:"session_name"`
+	SessionCommand string `yaml:"session_command"`
 }
 
 type fileConfig struct {
@@ -139,18 +143,22 @@ func normalizeGroups(groups []groupConfig, configPath string) []groupConfig {
 		jobs := make([]jobConfig, 0, len(group.Jobs))
 		for _, job := range group.Jobs {
 			jobs = append(jobs, jobConfig{
-				Name:         strings.TrimSpace(job.Name),
-				Schedule:     strings.TrimSpace(job.Schedule),
-				PromptFile:   resolveConfigRelativePath(configPath, job.PromptFile),
-				Command:      strings.TrimSpace(job.Command),
-				ArtifactsDir: resolveWorkingDirRelativePath(cwd, job.ArtifactsDir),
-				SummaryFile:  resolveWorkingDirRelativePath(cwd, job.SummaryFile),
+				Name:           strings.TrimSpace(job.Name),
+				Schedule:       strings.TrimSpace(job.Schedule),
+				PromptFile:     resolveConfigRelativePath(configPath, job.PromptFile),
+				Command:        strings.TrimSpace(job.Command),
+				ArtifactsDir:   resolveWorkingDirRelativePath(cwd, job.ArtifactsDir),
+				SummaryFile:    resolveWorkingDirRelativePath(cwd, job.SummaryFile),
+				SessionName:    strings.TrimSpace(job.SessionName),
+				SessionCommand: strings.TrimSpace(job.SessionCommand),
 			})
 		}
 		out = append(out, groupConfig{
-			GroupID: strings.TrimSpace(group.GroupID),
-			CWD:     cwd,
-			Jobs:    jobs,
+			GroupID:        strings.TrimSpace(group.GroupID),
+			CWD:            cwd,
+			SessionName:    strings.TrimSpace(group.SessionName),
+			SessionCommand: strings.TrimSpace(group.SessionCommand),
+			Jobs:           jobs,
 		})
 	}
 	return out

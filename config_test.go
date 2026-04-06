@@ -101,6 +101,45 @@ groups:
 	}
 }
 
+func TestParseConfigReadsSessionOverrides(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+    session_name: main-demo
+    session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+        prompt_file: ./prompts/hourly_review.md
+        session_name: job-demo
+        session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	group := cfg.groups[0]
+	if got, want := group.SessionName, "main-demo"; got != want {
+		t.Fatalf("group session_name = %q, want %q", got, want)
+	}
+	if got, want := group.SessionCommand, "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex"; got != want {
+		t.Fatalf("group session_command = %q, want %q", got, want)
+	}
+	job := group.Jobs[0]
+	if got, want := job.SessionName, "job-demo"; got != want {
+		t.Fatalf("job session_name = %q, want %q", got, want)
+	}
+	if got, want := job.SessionCommand, "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude"; got != want {
+		t.Fatalf("job session_command = %q, want %q", got, want)
+	}
+}
+
 func TestParseConfigReadsInterruptOnNewMessage(t *testing.T) {
 	t.Parallel()
 

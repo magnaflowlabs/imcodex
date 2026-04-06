@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+agent=""
+workspace=""
+session=""
+image=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent)
+      agent="${2:-}"
+      shift 2
+      ;;
+    --workspace)
+      workspace="${2:-}"
+      shift 2
+      ;;
+    --session)
+      session="${2:-}"
+      shift 2
+      ;;
+    --image)
+      image="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$agent" ]]; then
+  echo "required: --agent {codex|claude}" >&2
+  exit 1
+fi
+if [[ -z "$workspace" ]]; then
+  echo "required: --workspace <path>" >&2
+  exit 1
+fi
+if [[ ! -d "$workspace" ]]; then
+  echo "workspace does not exist: $workspace" >&2
+  exit 1
+fi
+
+case "$agent" in
+  codex)
+    image="${image:-imcodex-agent-codex:latest}"
+    entrypoint=(codex --no-alt-screen -C /workspace)
+    ;;
+  claude)
+    image="${image:-imcodex-agent-claude:latest}"
+    entrypoint=(claude)
+    ;;
+  *)
+    echo "unsupported agent: $agent" >&2
+    exit 1
+    ;;
+esac
+
+container_name="imcodex-$(printf '%s' "${session:-$workspace}" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]' | sed 's/^-//; s/-$//')"
+if [[ -z "$container_name" ]]; then
+  container_name="imcodex-agent"
+fi
+
+exec docker run --rm -it \
+  --name "$container_name" \
+  --hostname "$container_name" \
+  --workdir /workspace \
+  --mount "type=bind,src=$workspace,dst=/workspace" \
+  --tmpfs /tmp:exec,mode=1777 \
+  -e HOME=/home/agent \
+  -e CODEX_HOME=/home/agent/.codex \
+  "$image" \
+  "${entrypoint[@]}"

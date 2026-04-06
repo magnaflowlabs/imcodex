@@ -35,7 +35,8 @@ func main() {
 		options = append(options, gateway.Options{
 			GroupID:               group.GroupID,
 			CWD:                   group.CWD,
-			SessionName:           gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD),
+			SessionName:           firstNonEmpty(group.SessionName, gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD)),
+			SessionCommand:        group.SessionCommand,
 			InterruptOnNewMessage: cfg.interruptOnNewMessage,
 		})
 	}
@@ -127,15 +128,16 @@ func buildScheduledJobs(groups []groupConfig) []scheduler.Job {
 	for _, group := range groups {
 		for _, job := range group.Jobs {
 			jobs = append(jobs, scheduler.Job{
-				GroupID:      group.GroupID,
-				CWD:          group.CWD,
-				Name:         job.Name,
-				Schedule:     job.Schedule,
-				PromptFile:   job.PromptFile,
-				Command:      job.Command,
-				ArtifactsDir: job.ArtifactsDir,
-				SummaryFile:  job.SummaryFile,
-				SessionName:  scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name),
+				GroupID:        group.GroupID,
+				CWD:            group.CWD,
+				Name:           job.Name,
+				Schedule:       job.Schedule,
+				PromptFile:     job.PromptFile,
+				Command:        job.Command,
+				ArtifactsDir:   job.ArtifactsDir,
+				SummaryFile:    job.SummaryFile,
+				SessionName:    firstNonEmpty(job.SessionName, scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name)),
+				SessionCommand: firstNonEmpty(job.SessionCommand, group.SessionCommand),
 			})
 		}
 	}

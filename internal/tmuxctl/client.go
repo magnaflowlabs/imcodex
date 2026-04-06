@@ -11,12 +11,16 @@ import (
 
 const (
 	controlPaneOption = "@imcodex-control-pane"
+	controlPaneRole   = "@imcodex-pane-role"
 	controlWindowName = "imcodex"
 )
 
 type SessionSpec struct {
 	SessionName                 string
 	CWD                         string
+	GroupID                     string
+	JobName                     string
+	LaunchCommand               string
 	StartupWait                 time.Duration
 	AutoPressEnterOnTrustPrompt bool
 }
@@ -289,6 +293,9 @@ func (c *Client) setControlPane(ctx context.Context, session string, paneID stri
 	if err := c.run(ctx, "set-option", "-q", "-t", session, controlPaneOption, paneID); err != nil {
 		return fmt.Errorf("set tmux control pane option: %w", err)
 	}
+	if err := c.run(ctx, "set-option", "-p", "-t", paneID, controlPaneRole, "control"); err != nil {
+		return fmt.Errorf("set tmux control pane marker: %w", err)
+	}
 	return nil
 }
 
@@ -308,13 +315,14 @@ func (c *Client) hasPane(ctx context.Context, paneID string) (bool, error) {
 }
 
 func (c *Client) findExistingControlPane(ctx context.Context, session string, allowSinglePaneFallback bool) (string, error) {
-	out, err := c.output(ctx, "list-panes", "-t", session, "-F", "#{pane_id}\t#{pane_current_command}")
+	out, err := c.output(ctx, "list-panes", "-t", session, "-F", "#{pane_id}\t#{"+controlPaneRole+"}\t#{pane_current_command}")
 	if err != nil {
 		return "", fmt.Errorf("list tmux panes: %w", err)
 	}
 
 	type paneInfo struct {
 		id      string
+		role    string
 		command string
 	}
 
@@ -324,16 +332,24 @@ func (c *Client) findExistingControlPane(ctx context.Context, session string, al
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
+		parts := strings.SplitN(line, "\t", 3)
 		pane := paneInfo{id: strings.TrimSpace(parts[0])}
 		if len(parts) > 1 {
-			pane.command = strings.TrimSpace(parts[1])
+			pane.role = strings.TrimSpace(parts[1])
+		}
+		if len(parts) > 2 {
+			pane.command = strings.TrimSpace(parts[2])
 		}
 		if pane.id != "" {
 			panes = append(panes, pane)
 		}
 	}
 
+	for _, pane := range panes {
+		if pane.role == "control" {
+			return pane.id, nil
+		}
+	}
 	for _, pane := range panes {
 		if pane.command == "codex" {
 			return pane.id, nil
@@ -346,6 +362,9 @@ func (c *Client) findExistingControlPane(ctx context.Context, session string, al
 }
 
 func (c *Client) command(spec SessionSpec) string {
+	if strings.TrimSpace(spec.LaunchCommand) != "" {
+		return expandLaunchCommandTemplate(spec.LaunchCommand, spec)
+	}
 	if c.launchCommand != nil {
 		return c.launchCommand(spec)
 	}
@@ -360,6 +379,16 @@ func defaultLaunchCommand(spec SessionSpec) string {
 		"--no-alt-screen",
 		"-C", spec.CWD,
 	)
+}
+
+func expandLaunchCommandTemplate(template string, spec SessionSpec) string {
+	replacer := strings.NewReplacer(
+		"{cwd}", spec.CWD,
+		"{session_name}", spec.SessionName,
+		"{group_id}", spec.GroupID,
+		"{job_name}", spec.JobName,
+	)
+	return replacer.Replace(strings.TrimSpace(template))
 }
 
 func shellJoin(args ...string) string {

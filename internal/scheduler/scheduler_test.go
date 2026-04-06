@@ -39,9 +39,13 @@ type fakeConsole struct {
 	mu        sync.Mutex
 	captures  []string
 	sendTexts []string
+	ensure    []tmuxctl.SessionSpec
 }
 
-func (f *fakeConsole) EnsureSession(context.Context, tmuxctl.SessionSpec) (bool, error) {
+func (f *fakeConsole) EnsureSession(_ context.Context, spec tmuxctl.SessionSpec) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensure = append(f.ensure, spec)
 	return true, nil
 }
 
@@ -63,6 +67,14 @@ func (f *fakeConsole) Capture(context.Context, string, int) (string, error) {
 		f.captures = f.captures[1:]
 	}
 	return out, nil
+}
+
+func (f *fakeConsole) ensured() []tmuxctl.SessionSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]tmuxctl.SessionSpec, len(f.ensure))
+	copy(out, f.ensure)
+	return out
 }
 
 func TestNewRejectsInvalidSchedule(t *testing.T) {
@@ -164,6 +176,45 @@ func TestJobRunnerPostsNoOutputNotice(t *testing.T) {
 	outputs := messenger.all()
 	if len(outputs) != 1 || outputs[0] != "[job:silent_job] completed with no visible output." {
 		t.Fatalf("outputs = %#v, want no-output notice", outputs)
+	}
+}
+
+func TestJobRunnerPromptSessionPassesLaunchOverride(t *testing.T) {
+	t.Parallel()
+
+	promptFile := writeTempPrompt(t, "review the latest changes")
+	console := &fakeConsole{captures: []string{"", "", ""}}
+	job := &jobRunner{
+		job: Job{
+			GroupID:        "oc_1",
+			CWD:            t.TempDir(),
+			Name:           "claude_review",
+			Schedule:       "1 * * * *",
+			PromptFile:     promptFile,
+			SessionName:    "imcodex-job-claude-review",
+			SessionCommand: "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude",
+		},
+		messenger: &fakeMessenger{},
+		console:   console,
+		logger:    slog.Default(),
+		pollEvery: 5 * time.Millisecond,
+		startWait: 0,
+		history:   2000,
+	}
+
+	if err := job.run(context.Background()); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+
+	specs := console.ensured()
+	if len(specs) != 1 {
+		t.Fatalf("len(ensure) = %d, want 1", len(specs))
+	}
+	if got, want := specs[0].LaunchCommand, "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude"; got != want {
+		t.Fatalf("LaunchCommand = %q, want %q", got, want)
+	}
+	if got, want := specs[0].JobName, "claude_review"; got != want {
+		t.Fatalf("JobName = %q, want %q", got, want)
 	}
 }
 

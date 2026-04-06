@@ -56,6 +56,7 @@ type Options struct {
 	GroupID               string
 	CWD                   string
 	SessionName           string
+	SessionCommand        string
 	InterruptOnNewMessage bool
 }
 
@@ -357,6 +358,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	_, err := s.console.EnsureSession(s.ctx, tmuxctl.SessionSpec{
 		SessionName:                 rt.session,
 		CWD:                         rt.opts.CWD,
+		GroupID:                     rt.opts.GroupID,
+		LaunchCommand:               rt.opts.SessionCommand,
 		StartupWait:                 s.startWait,
 		AutoPressEnterOnTrustPrompt: true,
 	})
