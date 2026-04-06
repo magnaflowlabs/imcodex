@@ -107,11 +107,11 @@ Codex group session example:
 ```yaml
 platform: telegram
 telegram_bot_token: 123456:ABCDEF
+session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
 
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
-    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
 ```
 
 Claude group session example:
@@ -119,11 +119,11 @@ Claude group session example:
 ```yaml
 platform: telegram
 telegram_bot_token: 123456:ABCDEF
+session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
 
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
-    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
 ```
 
 Key properties of this model:
@@ -158,11 +158,11 @@ Key fields:
 | Field | Meaning |
 | --- | --- |
 | `platform` | `lark` or `telegram` |
+| `session_command` | Optional 2.0 global launch command template for all interactive agent sessions; if omitted, `imcodex` keeps the legacy host `codex` path |
 | `interrupt_on_new_message` | If `true`, a new group message interrupts the current main-session run and keeps only the newest pending message |
 | `groups[].group_id` | Group ID or Telegram chat ID |
 | `groups[].cwd` | Working directory mapped to that group |
 | `groups[].session_name` | Optional override for the tmux session name |
-| `groups[].session_command` | Optional 2.0 launch command template for the group's interactive agent session |
 | `groups[].jobs[].name` | Job name shown in job result posts |
 | `groups[].jobs[].schedule` | Standard 5-field cron expression |
 | `groups[].jobs[].prompt_file` | Markdown prompt file for agent-driven jobs; relative paths are resolved from the config file directory |
@@ -170,7 +170,6 @@ Key fields:
 | `groups[].jobs[].artifacts_dir` | Optional base dir for per-run logs; relative paths are resolved from `cwd` |
 | `groups[].jobs[].summary_file` | Optional file whose content is posted on success; relative paths are resolved from `cwd` |
 | `groups[].jobs[].session_name` | Optional override for a `prompt_file` job session name |
-| `groups[].jobs[].session_command` | Optional 2.0 launch command template for a `prompt_file` job session |
 
 Each job must set exactly one of `prompt_file` or `command`.
 
@@ -181,12 +180,12 @@ platform: lark
 lark_app_id: cli_xxx
 lark_app_secret: your_app_secret
 lark_base_url: https://open.larksuite.com
+session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
 interrupt_on_new_message: true
 
 groups:
   - group_id: oc_xxx
     cwd: /srv/my-project
-    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
     jobs:
       - name: hourly_review
         schedule: "1 * * * *"
@@ -210,12 +209,12 @@ Telegram:
 platform: telegram
 telegram_bot_token: 123456:ABCDEF
 telegram_base_url: https://api.telegram.org
+session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
 interrupt_on_new_message: true
 
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
-    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
     jobs:
       - name: hourly_review
         schedule: "1 * * * *"
@@ -304,7 +303,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 2.0.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 2.0.1 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior
@@ -333,7 +332,7 @@ Current Telegram defaults are internal constants: `working` after about `1s`, pa
 For more detail on the 2.0 runtime design that keeps host `tmux` while moving
 Codex or Claude execution into a workspace-confined Docker runtime, see
 [docs/runtime-v2-docker-tmux.md](docs/runtime-v2-docker-tmux.md). Existing
-1.x configs remain valid; the new session runtime fields are optional. Example
+1.x configs remain valid; the new global `session_command` field is optional. Example
 wrapper and Docker image assets live in
 [docs/runtime-v2-examples.md](docs/runtime-v2-examples.md).
 

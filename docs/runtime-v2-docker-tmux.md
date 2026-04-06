@@ -133,25 +133,24 @@ Example responsibility split:
 
 The minimum useful change is:
 
+- optional global `session_command`
 - optional per-group `session_name`
-- optional per-group `session_command`
-- optional per-job `session_name`
-- optional per-job `session_command` for `prompt_file` jobs
+- optional per-job `session_name` for `prompt_file` jobs
 
 Example shape:
 
 ```yaml
+session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
     session_name: imcodex-my-project
-    session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
     jobs:
       - name: claude_review
         schedule: "5 * * * *"
         prompt_file: ./prompts/review.md
         session_name: imcodex-job-my-project-claude-review
-        session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
 ```
 
 Template variables should stay small and explicit:
@@ -160,10 +159,8 @@ Template variables should stay small and explicit:
 - `{session_name}`
 - `{group_id}`
 
-If `session_command` is omitted, the current built-in Codex launch behavior
-should remain the default.
-
-The same fallback rule should apply at the job level.
+If `session_command` is omitted, the current built-in host-side Codex launch
+behavior should remain the default.
 
 ## Wrapper Script Responsibilities
 
@@ -203,8 +200,8 @@ This gives both properties the project wants:
 
 2.0 should stay small. The required code changes are:
 
-1. Add optional per-group and per-job session launch command overrides.
-2. Add optional per-group and per-job session name overrides.
+1. Add one optional global session launch command override.
+2. Keep optional per-group and per-job session name overrides.
 3. Pass `cwd` and session metadata into the command template.
 4. Relax control-pane recovery so it does not depend only on
    `pane_current_command == "codex"`.
