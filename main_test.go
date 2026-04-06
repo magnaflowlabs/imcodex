@@ -2,19 +2,21 @@ package main
 
 import "testing"
 
-func TestBuildScheduledJobsInheritsGroupSessionCommand(t *testing.T) {
+func TestBuildScheduledJobsUsesGlobalSessionCommand(t *testing.T) {
 	t.Parallel()
 
-	jobs := buildScheduledJobs([]groupConfig{{
-		GroupID:        "oc_1",
-		CWD:            "/srv/demo",
-		SessionCommand: "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex",
-		Jobs: []jobConfig{{
-			Name:       "hourly_review",
-			Schedule:   "1 * * * *",
-			PromptFile: "/srv/demo/prompts/hourly_review.md",
+	jobs := buildScheduledJobs(config{
+		sessionCommand: "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex",
+		groups: []groupConfig{{
+			GroupID: "oc_1",
+			CWD:     "/srv/demo",
+			Jobs: []jobConfig{{
+				Name:       "hourly_review",
+				Schedule:   "1 * * * *",
+				PromptFile: "/srv/demo/prompts/hourly_review.md",
+			}},
 		}},
-	}})
+	})
 	if len(jobs) != 1 {
 		t.Fatalf("len(jobs) = %d, want 1", len(jobs))
 	}
@@ -23,28 +25,29 @@ func TestBuildScheduledJobsInheritsGroupSessionCommand(t *testing.T) {
 	}
 }
 
-func TestBuildScheduledJobsPrefersJobSessionOverrides(t *testing.T) {
+func TestBuildScheduledJobsKeepsJobSessionNameOverride(t *testing.T) {
 	t.Parallel()
 
-	jobs := buildScheduledJobs([]groupConfig{{
-		GroupID:        "oc_1",
-		CWD:            "/srv/demo",
-		SessionCommand: "group-command",
-		Jobs: []jobConfig{{
-			Name:           "hourly_review",
-			Schedule:       "1 * * * *",
-			PromptFile:     "/srv/demo/prompts/hourly_review.md",
-			SessionName:    "job-session",
-			SessionCommand: "job-command",
+	jobs := buildScheduledJobs(config{
+		sessionCommand: "global-command",
+		groups: []groupConfig{{
+			GroupID: "oc_1",
+			CWD:     "/srv/demo",
+			Jobs: []jobConfig{{
+				Name:        "hourly_review",
+				Schedule:    "1 * * * *",
+				PromptFile:  "/srv/demo/prompts/hourly_review.md",
+				SessionName: "job-session",
+			}},
 		}},
-	}})
+	})
 	if len(jobs) != 1 {
 		t.Fatalf("len(jobs) = %d, want 1", len(jobs))
 	}
 	if got, want := jobs[0].SessionName, "job-session"; got != want {
 		t.Fatalf("job session_name = %q, want %q", got, want)
 	}
-	if got, want := jobs[0].SessionCommand, "job-command"; got != want {
+	if got, want := jobs[0].SessionCommand, "global-command"; got != want {
 		t.Fatalf("job session_command = %q, want %q", got, want)
 	}
 }

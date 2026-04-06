@@ -29,27 +29,26 @@ type config struct {
 	larkBaseURL           string
 	telegramBotToken      string
 	telegramBaseURL       string
+	sessionCommand        string
 	interruptOnNewMessage bool
 	groups                []groupConfig
 }
 
 type groupConfig struct {
-	GroupID        string      `yaml:"group_id"`
-	CWD            string      `yaml:"cwd"`
-	SessionName    string      `yaml:"session_name"`
-	SessionCommand string      `yaml:"session_command"`
-	Jobs           []jobConfig `yaml:"jobs"`
+	GroupID     string      `yaml:"group_id"`
+	CWD         string      `yaml:"cwd"`
+	SessionName string      `yaml:"session_name"`
+	Jobs        []jobConfig `yaml:"jobs"`
 }
 
 type jobConfig struct {
-	Name           string `yaml:"name"`
-	Schedule       string `yaml:"schedule"`
-	PromptFile     string `yaml:"prompt_file"`
-	Command        string `yaml:"command"`
-	ArtifactsDir   string `yaml:"artifacts_dir"`
-	SummaryFile    string `yaml:"summary_file"`
-	SessionName    string `yaml:"session_name"`
-	SessionCommand string `yaml:"session_command"`
+	Name         string `yaml:"name"`
+	Schedule     string `yaml:"schedule"`
+	PromptFile   string `yaml:"prompt_file"`
+	Command      string `yaml:"command"`
+	ArtifactsDir string `yaml:"artifacts_dir"`
+	SummaryFile  string `yaml:"summary_file"`
+	SessionName  string `yaml:"session_name"`
 }
 
 type fileConfig struct {
@@ -59,6 +58,7 @@ type fileConfig struct {
 	LarkBaseURL           string        `yaml:"lark_base_url"`
 	TelegramBotToken      string        `yaml:"telegram_bot_token"`
 	TelegramBaseURL       string        `yaml:"telegram_base_url"`
+	SessionCommand        string        `yaml:"session_command"`
 	InterruptOnNewMessage *bool         `yaml:"interrupt_on_new_message"`
 	Groups                []groupConfig `yaml:"groups"`
 }
@@ -97,6 +97,7 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 		larkBaseURL:           firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
 		telegramBotToken:      firstNonEmpty(file.TelegramBotToken, envValue(lookupEnv, "TELEGRAM_BOT_TOKEN")),
 		telegramBaseURL:       firstNonEmpty(file.TelegramBaseURL, envValue(lookupEnv, "TELEGRAM_BASE_URL"), defaultTelegramAPIURL),
+		sessionCommand:        strings.TrimSpace(file.SessionCommand),
 		interruptOnNewMessage: boolValue(file.InterruptOnNewMessage, true),
 		groups:                normalizeGroups(file.Groups, path),
 	}
@@ -143,22 +144,20 @@ func normalizeGroups(groups []groupConfig, configPath string) []groupConfig {
 		jobs := make([]jobConfig, 0, len(group.Jobs))
 		for _, job := range group.Jobs {
 			jobs = append(jobs, jobConfig{
-				Name:           strings.TrimSpace(job.Name),
-				Schedule:       strings.TrimSpace(job.Schedule),
-				PromptFile:     resolveConfigRelativePath(configPath, job.PromptFile),
-				Command:        strings.TrimSpace(job.Command),
-				ArtifactsDir:   resolveWorkingDirRelativePath(cwd, job.ArtifactsDir),
-				SummaryFile:    resolveWorkingDirRelativePath(cwd, job.SummaryFile),
-				SessionName:    strings.TrimSpace(job.SessionName),
-				SessionCommand: strings.TrimSpace(job.SessionCommand),
+				Name:         strings.TrimSpace(job.Name),
+				Schedule:     strings.TrimSpace(job.Schedule),
+				PromptFile:   resolveConfigRelativePath(configPath, job.PromptFile),
+				Command:      strings.TrimSpace(job.Command),
+				ArtifactsDir: resolveWorkingDirRelativePath(cwd, job.ArtifactsDir),
+				SummaryFile:  resolveWorkingDirRelativePath(cwd, job.SummaryFile),
+				SessionName:  strings.TrimSpace(job.SessionName),
 			})
 		}
 		out = append(out, groupConfig{
-			GroupID:        strings.TrimSpace(group.GroupID),
-			CWD:            cwd,
-			SessionName:    strings.TrimSpace(group.SessionName),
-			SessionCommand: strings.TrimSpace(group.SessionCommand),
-			Jobs:           jobs,
+			GroupID:     strings.TrimSpace(group.GroupID),
+			CWD:         cwd,
+			SessionName: strings.TrimSpace(group.SessionName),
+			Jobs:        jobs,
 		})
 	}
 	return out

@@ -11,6 +11,10 @@ lark_base_url: https://open.larksuite.com
 # telegram_bot_token: 123456:ABCDEF
 # telegram_base_url: https://api.telegram.org
 
+# Optional 2.0 global agent runtime override.
+# If omitted, imcodex keeps the legacy host-side codex launch path.
+# session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+
 interrupt_on_new_message: true
 
 # Each job must set exactly one of `prompt_file` or `command`.
@@ -18,16 +22,14 @@ interrupt_on_new_message: true
 groups:
   - group_id: oc_xxx_primary
     cwd: /srv/my-project
-    # Optional 2.0 overrides:
+    # Optional local session name override:
     # session_name: imcodex-my-project
-    # session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
     jobs:
       - name: hourly_review
         schedule: "1 * * * *"
         prompt_file: ./prompts/hourly_review.md
-        # Optional 2.0 overrides for prompt_file sessions:
+        # Optional local prompt_file session name override:
         # session_name: imcodex-job-my-project-hourly-review
-        # session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
       - name: hl_stack_cycle
         schedule: "6 * * * *"
         # Optional:

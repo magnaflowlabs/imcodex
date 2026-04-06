@@ -18,33 +18,36 @@ docker build -t imcodex-agent-claude:latest -f tools/runtime/Dockerfile.claude .
 ## Example Group Config For Codex
 
 ```yaml
+session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
-    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
 ```
 
 ## Example Group Config For Claude
 
 ```yaml
+session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
+
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
-    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
 ```
 
 ## Example Job Override
 
 ```yaml
+session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
-    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
     jobs:
       - name: nightly_review
         schedule: "5 2 * * *"
         prompt_file: ./prompts/nightly_review.md
-        session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
+        session_name: imcodex-job-nightly-review
 ```
 
 ## Notes

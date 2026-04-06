@@ -36,7 +36,7 @@ func main() {
 			GroupID:               group.GroupID,
 			CWD:                   group.CWD,
 			SessionName:           firstNonEmpty(group.SessionName, gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD)),
-			SessionCommand:        group.SessionCommand,
+			SessionCommand:        cfg.sessionCommand,
 			InterruptOnNewMessage: cfg.interruptOnNewMessage,
 		})
 	}
@@ -80,7 +80,7 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 		if err != nil {
 			return nil, err
 		}
-		if runner, err := buildScheduler(cfg.groups, tgClient, console); err != nil {
+		if runner, err := buildScheduler(cfg, tgClient, console); err != nil {
 			return nil, err
 		} else if runner != nil {
 			*startFuncs = append(*startFuncs, runner.Start)
@@ -99,7 +99,7 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 		if err != nil {
 			return nil, err
 		}
-		if runner, err := buildScheduler(cfg.groups, larkClient, console); err != nil {
+		if runner, err := buildScheduler(cfg, larkClient, console); err != nil {
 			return nil, err
 		} else if runner != nil {
 			*startFuncs = append(*startFuncs, runner.Start)
@@ -115,17 +115,17 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 	}
 }
 
-func buildScheduler(groups []groupConfig, messenger gateway.Messenger, console gateway.Console) (*scheduler.Runner, error) {
-	jobs := buildScheduledJobs(groups)
+func buildScheduler(cfg config, messenger gateway.Messenger, console gateway.Console) (*scheduler.Runner, error) {
+	jobs := buildScheduledJobs(cfg)
 	if len(jobs) == 0 {
 		return nil, nil
 	}
 	return scheduler.New(jobs, messenger, console, nil)
 }
 
-func buildScheduledJobs(groups []groupConfig) []scheduler.Job {
+func buildScheduledJobs(cfg config) []scheduler.Job {
 	jobs := make([]scheduler.Job, 0)
-	for _, group := range groups {
+	for _, group := range cfg.groups {
 		for _, job := range group.Jobs {
 			jobs = append(jobs, scheduler.Job{
 				GroupID:        group.GroupID,
@@ -137,7 +137,7 @@ func buildScheduledJobs(groups []groupConfig) []scheduler.Job {
 				ArtifactsDir:   job.ArtifactsDir,
 				SummaryFile:    job.SummaryFile,
 				SessionName:    firstNonEmpty(job.SessionName, scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name)),
-				SessionCommand: firstNonEmpty(job.SessionCommand, group.SessionCommand),
+				SessionCommand: cfg.sessionCommand,
 			})
 		}
 	}
