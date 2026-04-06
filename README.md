@@ -211,7 +211,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 1.1.13 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 1.1.14 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior
@@ -223,7 +223,7 @@ imcodex 1.1.13 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 
 | Slash commands | Forwarded as-is, for example `/new` or `/compact` |
 | Images / files | Downloaded into `cwd/.imcodex/inbox/`, then forwarded as a short text prompt with the saved path |
 | Telegram live output | Sends periodic typing actions while the first visible reply is pending, posts one early working status, then edits an active message after a short idle debounce |
-| Telegram edit rate limit | If Telegram returns `429` on `editMessageText`, buffered text is preserved and retried after `retry_after` backoff |
+| Telegram edit rate limit | If Telegram returns repeated `429` on `editMessageText`, buffered text first waits through `retry_after`, then degrades to plain sends so replies do not stay invisible indefinitely |
 | Telegram forwarding identity | Each Codex run is tracked by `(run_id, cursor)` for ordering and debug telemetry |
 | New prompt while prior tail is blocked on edit/backoff | New prompt dispatch proceeds immediately; unsent prior tail is detached to an internal send queue and delivered asynchronously |
 | Boundary capture safety | Before dispatching a new prompt, if boundary capture still shows busy or capture fails, dispatch is deferred so prior tail output is not dropped |
@@ -235,7 +235,7 @@ imcodex 1.1.13 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 
 | Job execution | Posts only the final result, not live incremental output |
 | Restart | Reuses existing `tmux` sessions when they still exist |
 
-Current Telegram defaults are internal constants: `working` after about `1s`, partial body refresh at most every `5s` while Codex is still busy, idle flush after `8` polling ticks (`~4s` at 500ms polling), output watchdog around `8s`, detached-queue watchdog around `15s`, and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
+Current Telegram defaults are internal constants: `working` after about `1s`, partial body refresh at most every `15s` while Codex is still busy, idle flush after `24` polling ticks (`~12s` at 500ms polling), output watchdog around `8s`, detached-queue watchdog around `15s`, and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
 
 ## Inspect Sessions
 

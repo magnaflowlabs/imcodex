@@ -18,13 +18,14 @@
 | Long-output integrity | Added regressions for very long replies, boundary newlines, and busy/idle boundary retries |
 | Scheduler logging safety | Fixed concurrent stdout/stderr-to-combined writer race found by `go test -race` |
 
-## v1.1.12 Stability Follow-Up
+## v1.1.14 Stability Follow-Up
 
 | Area | Result |
 | --- | --- |
 | 429 edit backoff behavior | `defer` now applies only during active backoff windows; once backoff expires, editable sync resumes immediately (no wait-for-idle lock) |
-| Watchdog + editable backoff | Output watchdog no longer detaches buffered editable body into plain messages while edit/output backoff is active |
-| Replay risk under 429 | Prevented duplicated prefix replay caused by backoff + premature detach interaction |
+| Watchdog + editable backoff | Short backoff windows keep editable body buffered; repeated 429s now degrade to plain sends so Telegram output does not appear stalled forever |
+| Replay risk under 429 | Deferred buffering now reconciles against the last published body so plain-send fallback forwards only the unsent tail |
+| Prompt echo cleanup | Normalization drops prompt continuation lines too, preventing wrapped long inputs from being forwarded back as reply text |
 | Verification harness | Added stronger mismatch diagnostics (head/tail/context/containment) for `tools/tgstub_e2e` |
 
 ## v1.1.13 Run-State Hardening
@@ -60,7 +61,7 @@
 | Outbound execution model | Use one per-group event loop to serialize all Telegram send/edit/retry operations |
 | Capture/session recovery | Retain buffered body text across transient tmux capture/session failures and retry flush after reconnect |
 | Telegram length limit | When the active message approaches a soft limit, roll over to a new Telegram message |
-| Telegram API 429 | Respect `retry_after`; keep buffered body text, defer only during backoff window, then retry editable sync immediately |
+| Telegram API 429 | Respect `retry_after`; keep buffered body text through the first backoff window, then fall back to plain sends if repeated edit 429s keep blocking visibility |
 | Detached send failures | Keep the detached queue head and retry with bounded backoff; do not drop on transient non-429 failures |
 | Watchdog | Force drain if buffered output or detached queue stays pending too long |
 
@@ -83,8 +84,8 @@
 | Parameter | Proposed default | Notes |
 | --- | --- | --- |
 | `working_after` | `1s` | Fast feedback so the group knows the bot is alive |
-| `busy_flush_after` | `5s` | Maximum time buffered body text can stay hidden while Codex is still busy |
-| Idle flush debounce | `8` polls (`~4s` at 500ms polling) | Long enough to absorb short pauses in Codex output |
+| `busy_flush_after` | `15s` | Maximum time buffered body text can stay hidden while Codex is still busy |
+| Idle flush debounce | `24` polls (`~12s` at 500ms polling) | Cuts edit frequency materially while keeping long runs visibly alive |
 | `edit_rollover_at` | `2800` runes | Soft limit for Telegram message editing |
 | `output_watchdog_after` | `8s` | Maximum time buffered output can remain pending before forced drain/detach |
 | `detached_watchdog_after` | `15s` | Maximum age of detached queue head before forced retry |
@@ -106,7 +107,7 @@
 | 9 | If boundary capture still shows busy or capture fails, keep the pending user message queued and retry dispatch on the next loop |
 | 10 | If editable flush cannot complete at the boundary (for example retry-backoff or stale editable message), detach the unsent tail into a plain send queue and continue dispatch without blocking |
 | 11 | Detached chunks carry `(run_id, cursor)` and are retried in order until successful delivery |
-| 12 | If output buffer age exceeds `output_watchdog_after`, force drain; in editable-backoff windows keep body buffered (no detach), otherwise detach and continue |
+| 12 | If output buffer age exceeds `output_watchdog_after`, force drain; short editable-backoff windows keep body buffered, but repeated edit 429s switch the run to plain-send fallback |
 
 ## Rationale
 
@@ -132,8 +133,8 @@
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
 | `working_after` | duration | `1s` | Delay before sending the first status message |
-| `busy_flush_after` | duration | `5s` | Maximum hidden-body delay while Codex is still generating |
-| `flush_idle_ticks` | integer | `8` | Idle polls required before flushing buffered reply text |
+| `busy_flush_after` | duration | `15s` | Maximum hidden-body delay while Codex is still generating |
+| `flush_idle_ticks` | integer | `24` | Polls required before flushing buffered reply text |
 | `output_watchdog_after` | duration | `8s` | Force drain buffered output if no successful forward for too long |
 | `detached_watchdog_after` | duration | `15s` | Force retry detached queue head if it remains pending too long |
 | `edit_rollover_at` | integer | `2800` | Soft threshold for starting a new Telegram message |
@@ -151,7 +152,7 @@ Current implementation uses internal constants for these values. YAML exposure i
 | Tmux state advances between polls right before a new prompt | The next Telegram reply starts from the refreshed boundary and does not replay stale prior output |
 | Reply fits within one message | The initial `working` message is edited into the final body message |
 | Reply exceeds Telegram safe size | Telegram shows a small number of continuation messages, each maintained with edit-in-place until rollover |
-| Telegram returns `429 Too Many Requests` during edit | Buffered body is retained and next edit attempt waits at least `retry_after` seconds |
+| Telegram returns repeated `429 Too Many Requests` during edit | Buffered body waits through backoff first, then the unsent tail is forwarded via plain sends instead of staying invisible |
 | Telegram path retries and reconnects under pressure | `(run_id, cursor)` remains monotonic and detached chunks are retried in order until delivery |
 | Tmux capture fails temporarily while body is buffered | Buffered body survives reconnect and is delivered before the next prompt dispatch |
 

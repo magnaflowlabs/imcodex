@@ -36,6 +36,29 @@ func TestUpdateToIncomingMessageAcceptsText(t *testing.T) {
 	}
 }
 
+func TestUpdateToIncomingMessagePreservesWhitespace(t *testing.T) {
+	t.Parallel()
+
+	msg, ok, err := updateToIncomingMessage(Update{
+		UpdateID: 2,
+		Message: &Message{
+			MessageID: 10,
+			Chat:      Chat{ID: -100123, Type: "supergroup"},
+			From:      &User{IsBot: false},
+			Text:      "  line one\n    line two  ",
+		},
+	})
+	if err != nil {
+		t.Fatalf("updateToIncomingMessage() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if got, want := msg.Text, "  line one\n    line two  "; got != want {
+		t.Fatalf("Text = %q, want %q", got, want)
+	}
+}
+
 func TestUpdateToIncomingMessageAcceptsPhotoWithCaption(t *testing.T) {
 	t.Parallel()
 

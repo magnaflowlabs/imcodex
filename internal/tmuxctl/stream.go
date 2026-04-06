@@ -13,16 +13,28 @@ func NormalizeSnapshot(snapshot string) string {
 
 	out := make([]string, 0, len(lines))
 	prevBlank := false
+	droppingPromptEcho := false
 	for _, line := range lines {
 		line = strings.TrimRight(line, " \t\r")
 		trimmed := strings.TrimSpace(line)
 
 		if trimmed == "" {
+			if droppingPromptEcho {
+				droppingPromptEcho = false
+				continue
+			}
 			if len(out) == 0 || prevBlank {
 				continue
 			}
 			out = append(out, "")
 			prevBlank = true
+			continue
+		}
+		if isPromptEchoStart(trimmed) {
+			droppingPromptEcho = true
+			continue
+		}
+		if droppingPromptEcho {
 			continue
 		}
 		if shouldIgnoreLine(trimmed) {
@@ -168,15 +180,43 @@ func shouldIgnoreLine(line string) bool {
 		strings.HasPrefix(line, "comes with higher risk of prompt injection."),
 		strings.HasPrefix(line, "1. Yes, continue"),
 		strings.HasPrefix(line, "2. No, quit"),
-		strings.HasPrefix(line, "Press enter to continue"),
-		strings.HasPrefix(line, "›"):
+		strings.HasPrefix(line, "Press enter to continue"):
 		return true
-	case strings.Contains(line, "% left ·"),
-		strings.Contains(line, "esc to interrupt"):
+	case looksLikeModelStatusLine(line),
+		looksLikeWorkingChromeLine(line):
 		return true
 	default:
 		return false
 	}
+}
+
+func isPromptEchoStart(line string) bool {
+	line = strings.TrimSpace(line)
+	return line == "›" || strings.HasPrefix(line, "› ")
+}
+
+func looksLikeWorkingChromeLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if !strings.Contains(lower, "esc to interrupt") {
+		return false
+	}
+	return strings.HasPrefix(lower, "• working") || strings.HasPrefix(lower, "working (")
+}
+
+func looksLikeModelStatusLine(line string) bool {
+	line = strings.TrimSpace(line)
+	lower := strings.ToLower(line)
+	if !strings.Contains(line, "% left ·") {
+		return false
+	}
+	if !strings.Contains(line, "· /") && !strings.Contains(line, "· ~/") {
+		return false
+	}
+	return strings.Contains(lower, "gpt-") ||
+		strings.Contains(lower, "codex") ||
+		strings.Contains(lower, "o1") ||
+		strings.Contains(lower, "o3") ||
+		strings.Contains(lower, "o4")
 }
 
 func isTrailingBusyChrome(line string) bool {

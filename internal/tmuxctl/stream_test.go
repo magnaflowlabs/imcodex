@@ -129,7 +129,7 @@ func TestNormalizeSnapshotKeepsModelLikeContentLines(t *testing.T) {
 	}
 }
 
-func TestNormalizeSnapshotKeepsNonPromptLinesAfterPromptPrefix(t *testing.T) {
+func TestNormalizeSnapshotDropsPromptContinuationLines(t *testing.T) {
 	t.Parallel()
 
 	raw := `› First line from user
@@ -139,9 +139,19 @@ Third line from user
 • Assistant reply`
 
 	got := NormalizeSnapshot(raw)
-	want := "Second line from user\nThird line from user\n\n• Assistant reply"
+	want := "• Assistant reply"
 	if got != want {
 		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeSnapshotKeepsAssistantTextMentioningInterruptPhrase(t *testing.T) {
+	t.Parallel()
+
+	raw := "• Document the phrase esc to interrupt for users"
+	got := NormalizeSnapshot(raw)
+	if got != raw {
+		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, raw)
 	}
 }
 
