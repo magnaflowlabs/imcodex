@@ -1,13 +1,14 @@
 # imcodex
 
-`imcodex` bridges a Lark, Feishu, or Telegram group chat to long-lived Codex CLI sessions running inside `tmux`.
+`imcodex` bridges a Lark, Feishu, or Telegram group chat to long-lived agent
+sessions running inside `tmux`.
 
 ## Model
 
 | Item | Behavior |
 | --- | --- |
-| Main chat session | One group = one `cwd` = one persistent Codex session |
-| Scheduled jobs | Declared in YAML; each job is either a `prompt_file` Codex session or a `command` shell run |
+| Main chat session | One group = one `cwd` = one persistent agent session |
+| Scheduled jobs | Declared in YAML; each job is either a `prompt_file` agent session or a `command` shell run |
 | Job visibility | Jobs post final results or failures back to the same group |
 | Context isolation | The main chat session and job sessions do not share Codex context |
 | Reconfiguration | Edit YAML and prompt `.md` files, then restart `imcodex` |
@@ -17,35 +18,121 @@
 | Requirement | Notes |
 | --- | --- |
 | `tmux` | Required at runtime |
-| Codex CLI | Required; `codex login` must already be completed |
+| Agent runtime | 1.x path: host `codex`; 2.0 path: Docker image running `codex` or `claude` |
+| Docker | Required for the recommended 2.0 runtime |
 | Go 1.24+ | Needed only for local builds |
 | Lark / Feishu bot or Telegram bot | Pick one backend |
 
 ## Install
 
+### Host Prerequisites
+
 macOS:
 
 ```bash
 brew install tmux
-npm install -g @openai/codex
-codex login
+brew install --cask docker
 ```
 
 Ubuntu 24.04:
 
 ```bash
 sudo apt update
-sudo apt install -y tmux
-sudo npm install -g @openai/codex
-codex login
+sudo apt install -y tmux docker.io
 ```
 
 Verify:
 
 ```bash
 tmux -V
+docker --version
+```
+
+### Agent Install Modes
+
+#### Recommended 2.0 Mode: Agent Inside Docker
+
+Build the example images shipped in this repo:
+
+```bash
+docker build -t imcodex-agent-codex:latest -f tools/runtime/Dockerfile.codex .
+docker build -t imcodex-agent-claude:latest -f tools/runtime/Dockerfile.claude .
+```
+
+This is the recommended path because it keeps the agent confined to one
+workspace mount instead of running directly on the host.
+
+#### Legacy Host Mode: Codex On Host
+
+If you want the old 1.x behavior, install Codex on the host:
+
+```bash
+npm install -g @openai/codex
+codex login
 codex --version
 ```
+
+#### Optional Host Install: Claude Code
+
+If you want to run Claude on the host instead of inside Docker:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude
+claude --version
+```
+
+The 2.0 runtime design still recommends running Claude inside Docker rather
+than on the host.
+
+## Runtime 2.0 Quickstart
+
+The recommended 2.0 topology is:
+
+- host `imcodex`
+- host `tmux`
+- host `docker`
+- containerized `codex` or `claude`
+- one mounted workspace per group session
+
+The repo includes a host wrapper script for this model:
+
+```bash
+chmod +x tools/runtime/imcodex-agent-run
+bash -n tools/runtime/imcodex-agent-run
+```
+
+Codex group session example:
+
+```yaml
+platform: telegram
+telegram_bot_token: 123456:ABCDEF
+
+groups:
+  - group_id: -1001234567890
+    cwd: /srv/my-project
+    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+```
+
+Claude group session example:
+
+```yaml
+platform: telegram
+telegram_bot_token: 123456:ABCDEF
+
+groups:
+  - group_id: -1001234567890
+    cwd: /srv/my-project
+    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
+```
+
+Key properties of this model:
+
+- `tmux` stays on the host so sessions remain easy to inspect
+- the agent process runs inside Docker
+- only the configured `cwd` is mounted into `/workspace`
+- the host home directory is not mounted by default
+- existing 1.x configs continue to work if `session_command` is omitted
 
 ## Group IDs
 
@@ -74,12 +161,16 @@ Key fields:
 | `interrupt_on_new_message` | If `true`, a new group message interrupts the current main-session run and keeps only the newest pending message |
 | `groups[].group_id` | Group ID or Telegram chat ID |
 | `groups[].cwd` | Working directory mapped to that group |
+| `groups[].session_name` | Optional override for the tmux session name |
+| `groups[].session_command` | Optional 2.0 launch command template for the group's interactive agent session |
 | `groups[].jobs[].name` | Job name shown in job result posts |
 | `groups[].jobs[].schedule` | Standard 5-field cron expression |
-| `groups[].jobs[].prompt_file` | Markdown prompt file for Codex-driven jobs; relative paths are resolved from the config file directory |
+| `groups[].jobs[].prompt_file` | Markdown prompt file for agent-driven jobs; relative paths are resolved from the config file directory |
 | `groups[].jobs[].command` | Shell command for deterministic CLI jobs such as `hl_stack`; runs in `cwd` |
 | `groups[].jobs[].artifacts_dir` | Optional base dir for per-run logs; relative paths are resolved from `cwd` |
 | `groups[].jobs[].summary_file` | Optional file whose content is posted on success; relative paths are resolved from `cwd` |
+| `groups[].jobs[].session_name` | Optional override for a `prompt_file` job session name |
+| `groups[].jobs[].session_command` | Optional 2.0 launch command template for a `prompt_file` job session |
 
 Each job must set exactly one of `prompt_file` or `command`.
 
@@ -95,6 +186,7 @@ interrupt_on_new_message: true
 groups:
   - group_id: oc_xxx
     cwd: /srv/my-project
+    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
     jobs:
       - name: hourly_review
         schedule: "1 * * * *"
@@ -123,6 +215,7 @@ interrupt_on_new_message: true
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
+    session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
     jobs:
       - name: hourly_review
         schedule: "1 * * * *"
@@ -149,7 +242,7 @@ export TELEGRAM_BASE_URL=https://api.telegram.org
 
 | Item | Behavior |
 | --- | --- |
-| Job types | `prompt_file` sends Markdown into a persistent Codex session; `command` runs `sh -lc` in `cwd` |
+| Job types | `prompt_file` sends Markdown into a persistent agent session; `command` runs `sh -lc` in `cwd` |
 | Relationship to main chat | Fully isolated; no shared Codex context |
 | Trigger behavior | At the scheduled time, `imcodex` sends the prompt or executes the command |
 | Group output | `prompt_file` jobs post final visible output; `command` jobs post `summary_file` when present, otherwise a tail of captured output |
@@ -218,7 +311,7 @@ imcodex 2.0.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 j
 
 | Scenario | Behavior |
 | --- | --- |
-| Plain text | Forwarded to the group's main Codex session |
+| Plain text | Forwarded to the group's main agent session |
 | Multi-line input | Preserved as one pasted input |
 | Slash commands | Forwarded as-is, for example `/new` or `/compact` |
 | Images / files | Downloaded into `cwd/.imcodex/inbox/`, then forwarded as a short text prompt with the saved path |
@@ -230,15 +323,15 @@ imcodex 2.0.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 j
 | Telegram forwarding watchdog | If buffered output or detached queue head stays pending too long, a watchdog forces drain/retry so forwarding cannot stall silently |
 | Tmux capture/session transient failure | Pending buffered output is retained and retried after reconnect before dispatching the next prompt |
 | Silent long-think protection | If a run is still in flight but tmux temporarily shows no visible body, `imcodex` keeps the run busy for a grace window instead of prematurely declaring completion |
-| Busy detection | Busy state is derived from Codex working chrome near the prompt, reducing false idle transitions when the pane footer layout shifts |
+| Busy detection | Busy state is derived from the agent working chrome near the prompt, reducing false idle transitions when the pane footer layout shifts |
 | New message while main session is busy | Interrupts the current run and keeps only the newest pending message by default |
 | Job execution | Posts only the final result, not live incremental output |
 | Restart | Reuses existing `tmux` sessions when they still exist |
 
 Current Telegram defaults are internal constants: `working` after about `1s`, partial body refresh at most every `15s` while Codex is still busy, idle flush after `24` polling ticks (`~12s` at 500ms polling), output watchdog around `8s`, detached-queue watchdog around `15s`, and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
 
-For the planned 2.0 runtime design that keeps host `tmux` while moving Codex
-or Claude execution into a workspace-confined Docker runtime, see
+For more detail on the 2.0 runtime design that keeps host `tmux` while moving
+Codex or Claude execution into a workspace-confined Docker runtime, see
 [docs/runtime-v2-docker-tmux.md](docs/runtime-v2-docker-tmux.md). Existing
 1.x configs remain valid; the new session runtime fields are optional. Example
 wrapper and Docker image assets live in
