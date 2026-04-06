@@ -210,7 +210,7 @@ func updateToIncomingMessage(update Update) (gateway.IncomingMessage, bool, erro
 	incoming := gateway.IncomingMessage{
 		MessageID: strconv.FormatInt(msg.MessageID, 10),
 		GroupID:   strconv.FormatInt(msg.Chat.ID, 10),
-		Text:      firstNonEmpty(strings.TrimSpace(msg.Text), strings.TrimSpace(msg.Caption)),
+		Text:      firstNonEmpty(msg.Text, msg.Caption),
 	}
 
 	if photo := selectLargestPhoto(msg.Photo); photo != nil {
@@ -282,8 +282,7 @@ func documentAttachment(doc *Document) *gateway.IncomingAttachment {
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
+		if strings.TrimSpace(value) != "" {
 			return value
 		}
 	}

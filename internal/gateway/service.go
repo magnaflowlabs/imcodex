@@ -21,11 +21,11 @@ const (
 	maxMessageRunes         = 3000
 	queueSize               = 64
 	recentMessageIDLimit    = 256
-	defaultFlushIdleTicks   = 8
+	defaultFlushIdleTicks   = 24
 	defaultIdleConfirmTicks = 3
 	defaultWorkingAfter     = time.Second
 	defaultChatActionEvery  = 4 * time.Second
-	defaultBusyFlushAfter   = 5 * time.Second
+	defaultBusyFlushAfter   = 15 * time.Second
 	defaultOutputWatchdog   = 8 * time.Second
 	defaultDetachedWatchdog = 15 * time.Second
 	defaultEditRolloverAt   = 2800
@@ -149,7 +149,9 @@ type groupRuntime struct {
 	detachedBackoffUntil time.Time
 	detachedRetryCount   int
 	editBackoffUntil     time.Time
+	editRateLimitCount   int
 	deferBodyUntilIdle   bool
+	forcePlainOutput     bool
 	busySince            time.Time
 	workingSent          bool
 	lastActionAt         time.Time
@@ -392,7 +394,9 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.detachedBackoffUntil = time.Time{}
 		rt.detachedRetryCount = 0
 		rt.editBackoffUntil = time.Time{}
+		rt.editRateLimitCount = 0
 		rt.deferBodyUntilIdle = false
+		rt.forcePlainOutput = false
 	}
 	rt.outputArmed = recoveringOutput
 	if rt.active == nil {
@@ -460,7 +464,9 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.detachedBackoffUntil = time.Time{}
 		rt.detachedRetryCount = 0
 		rt.editBackoffUntil = time.Time{}
+		rt.editRateLimitCount = 0
 		rt.deferBodyUntilIdle = false
+		rt.forcePlainOutput = false
 		rt.busySince = time.Time{}
 		rt.workingSent = false
 		rt.lastActionAt = time.Time{}
@@ -531,7 +537,9 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	rt.clearOutputBuffer()
 	rt.outputText = ""
 	rt.editBackoffUntil = time.Time{}
+	rt.editRateLimitCount = 0
 	rt.deferBodyUntilIdle = false
+	rt.forcePlainOutput = false
 	rt.busySince = time.Now()
 	rt.workingSent = false
 	rt.lastActionAt = time.Time{}
@@ -637,12 +645,10 @@ func (s *Service) poll(rt *groupRuntime) {
 	deferSnapshotCommit := false
 	if rt.outputArmed {
 		if s.shouldDeferBodyFlush(rt, now) {
-			// After editable 429, keep only the latest pane snapshot body while
-			// the run is active. This avoids accumulating transient rewritten
-			// fragments that would become replay-like spam once flushed.
-			currTrimmed := strings.Trim(currText, "\n")
-			rt.outputText = ""
-			rt.replaceOutputBuffer(currTrimmed, now)
+			// During editable backoff, keep reconciling against the last
+			// successfully published body so a later plain-send fallback can
+			// forward only the unsent tail instead of replaying the whole body.
+			s.reconcileDeferredOutput(rt, currText, now)
 		} else {
 			if reset {
 				if !s.resetBufferedOutput(rt, currText) {
@@ -803,7 +809,7 @@ func hasVisibleRunOutput(rt *groupRuntime, currText string) bool {
 }
 
 func (s *Service) shouldDeferBodyFlush(rt *groupRuntime, now time.Time) bool {
-	if rt == nil || !rt.deferBodyUntilIdle {
+	if rt == nil || rt.forcePlainOutput || !rt.deferBodyUntilIdle {
 		return false
 	}
 	if !rt.editBackoffUntil.IsZero() && rt.editBackoffUntil.After(now) {
@@ -1208,6 +1214,8 @@ func (s *Service) prepareOutputForDispatch(rt *groupRuntime) {
 	}
 	rt.clearOutputBuffer()
 	rt.outputText = ""
+	rt.editRateLimitCount = 0
+	rt.forcePlainOutput = false
 	if len(rt.outputMessages) == 1 && rt.outputMessages[0].text == workingStatusText {
 		return
 	}
@@ -1288,13 +1296,16 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 	}
 	now := time.Now()
 	editable := s.editableMessenger()
+	if rt.forcePlainOutput {
+		editable = nil
+	}
 	if editable != nil && s.shouldDeferBodyFlush(rt, now) {
 		return
 	}
 	if rt.outputBackoffActive(now) {
 		return
 	}
-	if !rt.editBackoffUntil.IsZero() {
+	if editable != nil && !rt.editBackoffUntil.IsZero() {
 		if rt.editBackoffUntil.After(now) {
 			return
 		}
@@ -1343,6 +1354,7 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 			return
 		}
 		rt.outputText = mergeBufferedOutput(rt.outputText, raw)
+		rt.editRateLimitCount = 0
 		s.logOutputStateDebug(rt, "flush plain output committed")
 		return
 	}
@@ -1371,9 +1383,14 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 			rt.outputBufferedAt = bufferedAt
 		}
 		if retryAfter := retryAfterFromRateLimitError(err); retryAfter > 0 {
+			rt.editRateLimitCount++
 			rt.editBackoffUntil = time.Now().Add(retryAfter)
 			rt.applyOutputBackoff(retryAfter)
 			rt.deferBodyUntilIdle = true
+			if rt.editRateLimitCount >= 2 {
+				rt.forcePlainOutput = true
+				rt.deferBodyUntilIdle = false
+			}
 			s.logger.Warn(
 				"sync editable output rate-limited",
 				"group_id",
@@ -1405,7 +1422,9 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 		return
 	}
 	rt.outputText = candidateText
+	rt.editRateLimitCount = 0
 	rt.deferBodyUntilIdle = false
+	rt.forcePlainOutput = false
 	s.logOutputStateDebug(rt, "flush editable output committed")
 }
 
@@ -1607,6 +1626,69 @@ func (rt *groupRuntime) applyOutputBackoff(retryAfter time.Duration) {
 	if retryAt.After(rt.outputBackoffUntil) {
 		rt.outputBackoffUntil = retryAt
 	}
+}
+
+func (rt *groupRuntime) publishedOutputText() string {
+	if rt == nil {
+		return ""
+	}
+	published := strings.Trim(rt.outputText, "\n")
+	editable := strings.Trim(joinTrackedMessages(rt.outputMessages), "\n")
+	switch {
+	case published == "":
+		return editable
+	case editable == "":
+		return published
+	case strings.HasPrefix(published, editable):
+		return published
+	case strings.HasPrefix(editable, published):
+		return editable
+	default:
+		return published
+	}
+}
+
+func joinTrackedMessages(messages []trackedMessage) string {
+	var b strings.Builder
+	for _, msg := range messages {
+		text := strings.Trim(msg.text, "\n")
+		if strings.TrimSpace(text) == "" || text == workingStatusText {
+			continue
+		}
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
+func (s *Service) reconcileDeferredOutput(rt *groupRuntime, currText string, now time.Time) {
+	if rt == nil {
+		return
+	}
+	currTrimmed := strings.Trim(currText, "\n")
+	if strings.TrimSpace(currTrimmed) == "" {
+		return
+	}
+	published := rt.publishedOutputText()
+	if published == "" {
+		rt.replaceOutputBuffer(currTrimmed, now)
+		return
+	}
+	if strings.HasPrefix(currTrimmed, published) {
+		rt.outputText = published
+		rt.replaceOutputBuffer(currTrimmed[len(published):], now)
+		return
+	}
+	delta, reset := tmuxctl.DiffText(published, currTrimmed)
+	if !reset {
+		rt.outputText = published
+		rt.replaceOutputBuffer(delta, now)
+		return
+	}
+	if rt.active != nil && utf8.RuneCountInString(currTrimmed) < utf8.RuneCountInString(published) {
+		return
+	}
+	rt.outputText = ""
+	rt.replaceOutputBuffer(currTrimmed, now)
 }
 
 func (rt *groupRuntime) enqueueDetachedOutput(runID uint64, text string) {

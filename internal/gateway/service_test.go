@@ -799,6 +799,50 @@ func TestServiceDoesNotForwardMultilinePromptEchoTail(t *testing.T) {
 	}
 }
 
+func TestServiceDoesNotForwardWrappedSingleLinePromptEchoTail(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"› this is a very long single-line prompt\nthat wrapped in the terminal\n\n• final reply",
+			"› this is a very long single-line prompt\nthat wrapped in the terminal\n\n• final reply",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 2
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "this is a very long single-line prompt that wrapped in the terminal",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) >= 1
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if strings.Contains(joined, "that wrapped in the terminal") {
+		t.Fatalf("messages = %#v, want wrapped prompt echo suppressed", messenger.all())
+	}
+	if !strings.Contains(joined, "• final reply") {
+		t.Fatalf("messages = %#v, want final reply forwarded", messenger.all())
+	}
+}
+
 func TestServiceRefreshesBaselineBeforeDispatchingNewRequest(t *testing.T) {
 	t.Parallel()
 
@@ -1893,6 +1937,53 @@ func TestServiceOutputWatchdogKeepsBufferedTailDuringActiveRunWhenEditBackoffBlo
 	}
 	if got := len(nonStatusMessages(messenger.all())); got != 0 {
 		t.Fatalf("messages = %#v, want no detached plain sends during active run", messenger.all())
+	}
+}
+
+func TestServiceFallsBackToPlainOutputAfterRepeatedEditableRateLimits(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{
+		messages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+		editErrs: []error{
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 2 retry_after=2"),
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 2 retry_after=2"),
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            9,
+		nextRunID:        9,
+		outputText:       "• synced",
+		outputBuffer:     "\n• new tail",
+		outputBufferedAt: time.Now(),
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+	}
+
+	svc.flushOutputBuffer(rt)
+	if rt.forcePlainOutput {
+		t.Fatal("forcePlainOutput = true, want editable retry after first 429")
+	}
+	rt.outputBackoffUntil = time.Time{}
+	rt.editBackoffUntil = time.Time{}
+
+	svc.flushOutputBuffer(rt)
+	if !rt.forcePlainOutput {
+		t.Fatal("forcePlainOutput = false, want fallback after second 429")
+	}
+	rt.outputBackoffUntil = time.Time{}
+	rt.editBackoffUntil = time.Time{}
+
+	svc.flushOutputBuffer(rt)
+
+	got := nonStatusMessages(messenger.all())
+	if len(got) != 2 || got[0] != "• synced" || got[1] != "• new tail" {
+		t.Fatalf("messages = %#v, want prior editable body plus plain fallback tail", got)
 	}
 }
 
