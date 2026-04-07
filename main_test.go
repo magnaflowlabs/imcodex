@@ -51,3 +51,25 @@ func TestBuildScheduledJobsKeepsJobSessionNameOverride(t *testing.T) {
 		t.Fatalf("job session_command = %q, want %q", got, want)
 	}
 }
+
+func TestBuildScheduledJobsLeavesSessionCommandEmptyForLegacyMode(t *testing.T) {
+	t.Parallel()
+
+	jobs := buildScheduledJobs(config{
+		groups: []groupConfig{{
+			GroupID: "oc_1",
+			CWD:     "/srv/demo",
+			Jobs: []jobConfig{{
+				Name:       "hourly_review",
+				Schedule:   "1 * * * *",
+				PromptFile: "/srv/demo/prompts/hourly_review.md",
+			}},
+		}},
+	})
+	if len(jobs) != 1 {
+		t.Fatalf("len(jobs) = %d, want 1", len(jobs))
+	}
+	if jobs[0].SessionCommand != "" {
+		t.Fatalf("job session_command = %q, want empty legacy default", jobs[0].SessionCommand)
+	}
+}

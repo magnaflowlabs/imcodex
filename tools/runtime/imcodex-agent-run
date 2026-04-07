@@ -46,11 +46,11 @@ fi
 
 case "$agent" in
   codex)
-    image="${image:-imcodex-agent-codex:latest}"
+    image="${image:-imcodex-agent-codex:0.118.0}"
     entrypoint=(codex --no-alt-screen -C /workspace)
     ;;
   claude)
-    image="${image:-imcodex-agent-claude:latest}"
+    image="${image:-imcodex-agent-claude:2.1.92}"
     entrypoint=(claude)
     ;;
   *)

@@ -27,6 +27,11 @@ Compatibility rules:
 - 2.0 adds an optional runtime override layer rather than replacing the
   existing defaults.
 
+In concrete terms:
+
+- omit `session_command` -> host `codex` in `tmux`
+- set `session_command` -> external wrapper decides Docker/Codex/Claude path
+
 ## Recommendation
 
 2.0 should keep `tmux`, but move the agent process into Docker.
@@ -161,6 +166,8 @@ Template variables should stay small and explicit:
 
 If `session_command` is omitted, the current built-in host-side Codex launch
 behavior should remain the default.
+
+That default is the compatibility bridge for old 1.x config files.
 
 ## Wrapper Script Responsibilities
 
