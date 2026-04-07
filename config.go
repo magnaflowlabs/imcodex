@@ -15,20 +15,27 @@ import (
 )
 
 const (
-	defaultConfigPath     = "imcodex.yaml"
-	defaultUserConfigName = ".imcodex.yaml"
-	defaultPlatform       = "lark"
-	defaultTelegramAPIURL = "https://api.telegram.org"
+	defaultConfigPath         = "imcodex.yaml"
+	defaultUserConfigName     = ".imcodex.yaml"
+	defaultPlatform           = "lark"
+	defaultTelegramAPIURL     = "https://api.telegram.org"
+	defaultRuntime            = "host-codex"
+	runtimeDockerCodex        = "docker-codex"
+	runtimeDockerClaude       = "docker-claude"
+	defaultDockerCodexLaunch  = "imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex"
+	defaultDockerClaudeLaunch = "imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude"
 )
 
 type config struct {
 	path                  string
 	platform              string
+	runtime               string
 	larkAppID             string
 	larkAppSecret         string
 	larkBaseURL           string
 	telegramBotToken      string
 	telegramBaseURL       string
+	runtimeConfigDir      string
 	sessionCommand        string
 	interruptOnNewMessage bool
 	groups                []groupConfig
@@ -53,11 +60,13 @@ type jobConfig struct {
 
 type fileConfig struct {
 	Platform              string        `yaml:"platform"`
+	Runtime               string        `yaml:"runtime"`
 	LarkAppID             string        `yaml:"lark_app_id"`
 	LarkAppSecret         string        `yaml:"lark_app_secret"`
 	LarkBaseURL           string        `yaml:"lark_base_url"`
 	TelegramBotToken      string        `yaml:"telegram_bot_token"`
 	TelegramBaseURL       string        `yaml:"telegram_base_url"`
+	RuntimeConfigDir      string        `yaml:"runtime_config_dir"`
 	SessionCommand        string        `yaml:"session_command"`
 	InterruptOnNewMessage *bool         `yaml:"interrupt_on_new_message"`
 	Groups                []groupConfig `yaml:"groups"`
@@ -88,16 +97,27 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 	if err := dec.Decode(&file); err != nil {
 		return config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
+	runtime, err := normalizeRuntime(file.Runtime)
+	if err != nil {
+		return config{}, err
+	}
+	runtimeConfigDir := resolveConfigRelativePath(path, file.RuntimeConfigDir)
+	sessionCommand, err := resolveSessionCommand(runtime, runtimeConfigDir, file.SessionCommand)
+	if err != nil {
+		return config{}, err
+	}
 
 	cfg := config{
 		path:                  path,
 		platform:              firstNonEmpty(file.Platform, envValue(lookupEnv, "IMCODEX_PLATFORM"), defaultPlatform),
+		runtime:               runtime,
 		larkAppID:             firstNonEmpty(file.LarkAppID, envValue(lookupEnv, "LARK_APP_ID")),
 		larkAppSecret:         firstNonEmpty(file.LarkAppSecret, envValue(lookupEnv, "LARK_APP_SECRET")),
 		larkBaseURL:           firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
 		telegramBotToken:      firstNonEmpty(file.TelegramBotToken, envValue(lookupEnv, "TELEGRAM_BOT_TOKEN")),
 		telegramBaseURL:       firstNonEmpty(file.TelegramBaseURL, envValue(lookupEnv, "TELEGRAM_BASE_URL"), defaultTelegramAPIURL),
-		sessionCommand:        strings.TrimSpace(file.SessionCommand),
+		runtimeConfigDir:      runtimeConfigDir,
+		sessionCommand:        sessionCommand,
 		interruptOnNewMessage: boolValue(file.InterruptOnNewMessage, true),
 		groups:                normalizeGroups(file.Groups, path),
 	}
@@ -259,6 +279,52 @@ func boolValue(value *bool, fallback bool) bool {
 		return fallback
 	}
 	return *value
+}
+
+func normalizeRuntime(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return defaultRuntime, nil
+	}
+	switch value {
+	case defaultRuntime, runtimeDockerCodex, runtimeDockerClaude:
+		return value, nil
+	default:
+		return "", fmt.Errorf("unsupported runtime: %s", value)
+	}
+}
+
+func resolveSessionCommand(runtime string, runtimeConfigDir string, sessionCommand string) (string, error) {
+	sessionCommand = strings.TrimSpace(sessionCommand)
+	if sessionCommand != "" {
+		return sessionCommand, nil
+	}
+	switch runtime {
+	case "", defaultRuntime:
+		return "", nil
+	case runtimeDockerCodex:
+		return appendRuntimeConfigDir(defaultDockerCodexLaunch, runtimeConfigDir), nil
+	case runtimeDockerClaude:
+		return appendRuntimeConfigDir(defaultDockerClaudeLaunch, runtimeConfigDir), nil
+	default:
+		return "", fmt.Errorf("unsupported runtime: %s", runtime)
+	}
+}
+
+func appendRuntimeConfigDir(command string, runtimeConfigDir string) string {
+	runtimeConfigDir = strings.TrimSpace(runtimeConfigDir)
+	if runtimeConfigDir == "" {
+		return command
+	}
+	return command + " --config-dir " + shellQuote(runtimeConfigDir)
+}
+
+func shellQuote(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func resolveConfigRelativePath(configPath string, value string) string {

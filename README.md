@@ -18,8 +18,8 @@ sessions running inside `tmux`.
 | Requirement | Notes |
 | --- | --- |
 | `tmux` | Required at runtime |
-| Agent runtime | 1.x path: host `codex`; 2.0 path: Docker image running `codex` or `claude` |
-| Docker | Required for the recommended 2.0 runtime |
+| Agent runtime | Default path: host `codex`; optional enhancement: Docker `codex` or `claude` |
+| Docker | Optional; only needed for `docker-*` runtime |
 | Go 1.24+ | Needed only for local builds |
 | Lark / Feishu bot or Telegram bot | Pick one backend |
 
@@ -48,9 +48,29 @@ tmux -V
 docker --version
 ```
 
-### Agent Install Modes
+### Default Runtime: Host Codex
 
-#### Recommended 2.0 Mode: Agent Inside Docker
+If you want the old 1.x behavior, install Codex on the host:
+
+```bash
+npm install -g @openai/codex
+codex login
+codex --version
+```
+
+Host Codex mode is still supported in 2.x. If both `runtime` and
+`session_command` are omitted from the config, `imcodex` launches `codex`
+directly in `tmux`, which is the same compatibility path as 1.x.
+
+If Codex asks for `npm install -g @openai/codex@latest` during startup, do not
+let the live runtime self-upgrade in the middle of production traffic. Upgrade
+it during a maintenance window instead, or switch the deployment to a pinned
+Docker runtime.
+
+### Optional Runtime: Docker Sandbox
+
+If you want workspace-only isolation, install Docker and the wrapper script in
+`PATH`, then use the higher-level `runtime:` shortcut.
 
 Build the example images shipped in this repo:
 
@@ -59,8 +79,8 @@ docker build --build-arg CODEX_VERSION=0.118.0 -t imcodex-agent-codex:0.118.0 -f
 docker build --build-arg CLAUDE_CODE_VERSION=2.1.92 -t imcodex-agent-claude:2.1.92 -f tools/runtime/Dockerfile.claude .
 ```
 
-This is the recommended path because it keeps the agent confined to one
-workspace mount instead of running directly on the host.
+This path keeps the agent confined to one workspace mount instead of running
+directly on the host.
 
 Recommended update policy:
 
@@ -73,26 +93,7 @@ Recommended update policy:
 If you want the runtime to stop getting interrupted by upgrade prompts, prefer
 this Docker mode over host-installed CLIs.
 
-#### Legacy Host Mode: Codex On Host
-
-If you want the old 1.x behavior, install Codex on the host:
-
-```bash
-npm install -g @openai/codex
-codex login
-codex --version
-```
-
-Host Codex mode is still supported in 2.x. If `session_command` is omitted
-from the config, `imcodex` launches `codex` directly in `tmux`, which is the
-same compatibility path as 1.x.
-
-If Codex asks for `npm install -g @openai/codex@latest` during startup, do not
-let the live runtime self-upgrade in the middle of production traffic. Upgrade
-it during a maintenance window instead, or switch the deployment to the pinned
-Docker runtime above.
-
-#### Optional Host Install: Claude Code
+### Optional Host Install: Claude Code
 
 If you want to run Claude on the host instead of inside Docker:
 
@@ -115,7 +116,7 @@ export DISABLE_AUTOUPDATER=1
 
 ## Runtime 2.0 Quickstart
 
-The recommended 2.0 topology is:
+The Docker shortcut topology is:
 
 - host `imcodex`
 - host `tmux`
@@ -135,12 +136,18 @@ The shipped wrapper defaults to pinned image tags:
 - `imcodex-agent-codex:0.118.0`
 - `imcodex-agent-claude:2.1.92`
 
+Install it somewhere in `PATH`, for example:
+
+```bash
+install -m 0755 tools/runtime/imcodex-agent-run /usr/local/bin/imcodex-agent-run
+```
+
 Codex group session example:
 
 ```yaml
 platform: telegram
 telegram_bot_token: 123456:ABCDEF
-session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+runtime: docker-codex
 
 groups:
   - group_id: -1001234567890
@@ -152,11 +159,19 @@ Claude group session example:
 ```yaml
 platform: telegram
 telegram_bot_token: 123456:ABCDEF
-session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
+runtime: docker-claude
 
 groups:
   - group_id: -1001234567890
     cwd: /srv/my-project
+```
+
+If you already have host config you want to reuse without mounting your whole
+home directory, use the optional read-only config seed:
+
+```yaml
+runtime: docker-codex
+runtime_config_dir: ~/.codex
 ```
 
 Key properties of this model:
@@ -164,17 +179,19 @@ Key properties of this model:
 - `tmux` stays on the host so sessions remain easy to inspect
 - the agent process runs inside Docker
 - only the configured `cwd` is mounted into `/workspace`
+- an optional read-only config dir can be copied into the container-local home
 - the host home directory is not mounted by default
-- existing 1.x configs continue to work if `session_command` is omitted
+- existing 1.x configs continue to work if both `runtime` and `session_command` are omitted
 
 ## Compatibility
 
 `v2.0.2` keeps the old config behavior:
 
-- if `session_command` is omitted, `imcodex` uses the legacy host-side `codex`
+- if both `runtime` and `session_command` are omitted, `imcodex` uses the legacy host-side `codex`
   launch path
 - existing 1.x configs without any 2.0 runtime fields remain valid
-- adding `session_command` is an opt-in switch to the Docker-backed runtime
+- adding `runtime: docker-*` is the simple opt-in switch to the Docker-backed runtime
+- `session_command` remains the low-level escape hatch
 
 ## Group IDs
 
@@ -200,7 +217,9 @@ Key fields:
 | Field | Meaning |
 | --- | --- |
 | `platform` | `lark` or `telegram` |
-| `session_command` | Optional 2.0 global launch command template for all interactive agent sessions; if omitted, `imcodex` keeps the legacy host `codex` path |
+| `runtime` | Optional high-level runtime selector: `host-codex`, `docker-codex`, or `docker-claude`; defaults to `host-codex` |
+| `runtime_config_dir` | Optional read-only config seed copied into the container-local agent home for `docker-*` runtimes |
+| `session_command` | Optional low-level launch command template; if set, it overrides `runtime` |
 | `interrupt_on_new_message` | If `true`, a new group message interrupts the current main-session run and keeps only the newest pending message |
 | `groups[].group_id` | Group ID or Telegram chat ID |
 | `groups[].cwd` | Working directory mapped to that group |
@@ -222,7 +241,7 @@ platform: lark
 lark_app_id: cli_xxx
 lark_app_secret: your_app_secret
 lark_base_url: https://open.larksuite.com
-session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+runtime: host-codex
 interrupt_on_new_message: true
 
 groups:
@@ -251,7 +270,7 @@ Telegram:
 platform: telegram
 telegram_bot_token: 123456:ABCDEF
 telegram_base_url: https://api.telegram.org
-session_command: /srv/imcodex/tools/runtime/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude
+runtime: docker-claude
 interrupt_on_new_message: true
 
 groups:
@@ -356,7 +375,7 @@ imcodex 2.0.2 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 j
 | Multi-line input | Preserved as one pasted input |
 | Slash commands | Forwarded as-is, for example `/new` or `/compact` |
 | Images / files | Downloaded into `cwd/.imcodex/inbox/`, then forwarded as a short text prompt with the saved path |
-| Telegram live output | Sends periodic typing actions while the first visible reply is pending, posts one early working status, then edits an active message after a short idle debounce |
+| Telegram live output | Sends periodic typing actions while the first visible reply is pending, keeps a separate working status, and updates segmented body messages at a low frequency |
 | Telegram edit rate limit | If Telegram returns repeated `429` on `editMessageText`, buffered text first waits through `retry_after`, then degrades to plain sends so replies do not stay invisible indefinitely |
 | Telegram forwarding identity | Each Codex run is tracked by `(run_id, cursor)` for ordering and debug telemetry |
 | New prompt while prior tail is blocked on edit/backoff | New prompt dispatch proceeds immediately; unsent prior tail is detached to an internal send queue and delivered asynchronously |
@@ -369,12 +388,13 @@ imcodex 2.0.2 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 j
 | Job execution | Posts only the final result, not live incremental output |
 | Restart | Reuses existing `tmux` sessions when they still exist |
 
-Current Telegram defaults are internal constants: `working` after about `1s`, partial body refresh at most every `15s` while Codex is still busy, idle flush after `24` polling ticks (`~12s` at 500ms polling), output watchdog around `8s`, detached-queue watchdog around `15s`, and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
+Current Telegram defaults are internal constants: `working` after about `1s`, editable body refresh at most every `5s` while a run is still busy, idle flush after `24` polling ticks (`~12s` at 500ms polling), output watchdog around `8s`, detached-queue watchdog around `15s`, and rollover near `2800` runes. See [docs/telegram-output-buffering.md](docs/telegram-output-buffering.md).
 
 For more detail on the 2.0 runtime design that keeps host `tmux` while moving
 Codex or Claude execution into a workspace-confined Docker runtime, see
 [docs/runtime-v2-docker-tmux.md](docs/runtime-v2-docker-tmux.md). Existing
-1.x configs remain valid; the new global `session_command` field is optional. Example
+1.x configs remain valid; `runtime` is the new high-level shortcut and
+`session_command` remains optional as an escape hatch. Example
 wrapper and Docker image assets live in
 [docs/runtime-v2-examples.md](docs/runtime-v2-examples.md).
 
@@ -414,8 +434,8 @@ Check:
 1. The bot is in the correct group.
 2. `group_id` / `chat_id` matches the real target group.
 3. `cwd` exists on the host running `imcodex`.
-4. `tmux` and `codex` are in `PATH`.
-5. `codex login` has already completed.
+4. If you use host mode, `tmux` and `codex` are in `PATH`, and `codex login` has already completed.
+5. If you use `runtime: docker-*`, `tmux`, `docker`, and `imcodex-agent-run` are in `PATH`.
 6. For Telegram, privacy mode is disabled if you expect normal group messages to reach the bot.
 
 ### Scheduled jobs are not firing

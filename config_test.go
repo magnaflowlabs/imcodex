@@ -136,6 +136,77 @@ groups:
 	}
 }
 
+func TestParseConfigDerivesDockerCodexSessionCommandFromRuntime(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+runtime: docker-codex
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	if got, want := cfg.runtime, "docker-codex"; got != want {
+		t.Fatalf("runtime = %q, want %q", got, want)
+	}
+	if got, want := cfg.sessionCommand, "imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex"; got != want {
+		t.Fatalf("sessionCommand = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigDerivesDockerClaudeSessionCommandWithConfigDir(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+runtime: docker-claude
+runtime_config_dir: ./runtime/claude-config
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	if got, want := cfg.runtimeConfigDir, "/srv/imcodex/runtime/claude-config"; got != want {
+		t.Fatalf("runtimeConfigDir = %q, want %q", got, want)
+	}
+	if got, want := cfg.sessionCommand, "imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude --config-dir '/srv/imcodex/runtime/claude-config'"; got != want {
+		t.Fatalf("sessionCommand = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigSessionCommandOverridesRuntimeShortcut(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+runtime: docker-codex
+session_command: /usr/local/bin/custom-wrapper --workspace '{cwd}'
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	if got, want := cfg.sessionCommand, "/usr/local/bin/custom-wrapper --workspace '{cwd}'"; got != want {
+		t.Fatalf("sessionCommand = %q, want %q", got, want)
+	}
+}
+
 func TestParseConfigKeepsLegacyModeWhenSessionCommandIsOmitted(t *testing.T) {
 	t.Parallel()
 
@@ -152,6 +223,23 @@ groups:
 	}
 	if cfg.sessionCommand != "" {
 		t.Fatalf("sessionCommand = %q, want empty legacy default", cfg.sessionCommand)
+	}
+}
+
+func TestParseConfigRejectsUnsupportedRuntime(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+runtime: sandbox-codex
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported runtime") {
+		t.Fatalf("parseConfig() error = %v, want unsupported runtime error", err)
 	}
 }
 

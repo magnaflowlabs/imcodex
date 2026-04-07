@@ -18,19 +18,20 @@ import (
 )
 
 const (
-	maxMessageRunes         = 3000
-	queueSize               = 64
-	recentMessageIDLimit    = 256
-	defaultFlushIdleTicks   = 24
-	defaultIdleConfirmTicks = 3
-	defaultWorkingAfter     = time.Second
-	defaultChatActionEvery  = 4 * time.Second
-	defaultBusyFlushAfter   = 15 * time.Second
-	defaultOutputWatchdog   = 8 * time.Second
-	defaultDetachedWatchdog = 15 * time.Second
-	defaultEditRolloverAt   = 2800
-	defaultSilentBusyGrace  = 20 * time.Minute
-	workingStatusText       = "[working] Codex is processing."
+	maxMessageRunes          = 3000
+	queueSize                = 64
+	recentMessageIDLimit     = 256
+	defaultFlushIdleTicks    = 24
+	defaultIdleConfirmTicks  = 3
+	defaultWorkingAfter      = time.Second
+	defaultChatActionEvery   = 4 * time.Second
+	defaultBusyFlushAfter    = 5 * time.Second
+	defaultOutputWatchdog    = 8 * time.Second
+	defaultDetachedWatchdog  = 15 * time.Second
+	defaultEditRolloverAt    = 2800
+	defaultEditableSyncEvery = 5 * time.Second
+	defaultSilentBusyGrace   = 20 * time.Minute
+	workingStatusText        = "[working] Codex is processing."
 )
 
 type IncomingMessage struct {
@@ -111,6 +112,7 @@ type Service struct {
 	outputWatchdogAfter   time.Duration
 	detachedWatchdogAfter time.Duration
 	editRolloverAt        int
+	editableSyncEvery     time.Duration
 	silentBusyGrace       time.Duration
 	interruptForceAfter   time.Duration
 
@@ -145,12 +147,14 @@ type groupRuntime struct {
 	outputBufferedTicks  int
 	outputText           string
 	outputMessages       []trackedMessage
+	statusMessage        trackedMessage
 	detachedOutputs      []detachedOutput
 	outputBackoffUntil   time.Time
 	detachedBackoffUntil time.Time
 	detachedRetryCount   int
 	editBackoffUntil     time.Time
 	editRateLimitCount   int
+	lastEditableSyncAt   time.Time
 	deferBodyUntilIdle   bool
 	forcePlainOutput     bool
 	busySince            time.Time
@@ -200,6 +204,7 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		outputWatchdogAfter:   defaultOutputWatchdog,
 		detachedWatchdogAfter: defaultDetachedWatchdog,
 		editRolloverAt:        defaultEditRolloverAt,
+		editableSyncEvery:     defaultEditableSyncEvery,
 		silentBusyGrace:       defaultSilentBusyGrace,
 		interruptForceAfter:   time.Second,
 	}
@@ -349,6 +354,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.hasBufferedOutput() ||
 		strings.TrimSpace(rt.outputText) != "" ||
 		len(rt.outputMessages) > 0 ||
+		rt.statusMessage.messageID != "" ||
 		len(rt.detachedOutputs) > 0 ||
 		rt.promptEchoPending ||
 		!rt.outputBackoffUntil.IsZero() ||
@@ -391,6 +397,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.clearOutputBuffer()
 		rt.outputText = ""
 		rt.outputMessages = nil
+		rt.statusMessage = trackedMessage{}
 		rt.promptEchoTail = ""
 		rt.promptEchoPending = false
 		rt.outputBackoffUntil = time.Time{}
@@ -423,7 +430,7 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 	if !s.finalizeOutputBeforeDispatch(rt) {
 		return
 	}
-	s.flushOutputBuffer(rt)
+	s.flushOutputBufferForced(rt)
 	if rt.hasBufferedOutput() {
 		s.detachBufferedOutput(rt)
 	}
@@ -462,6 +469,7 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 		rt.clearOutputBuffer()
 		rt.outputText = ""
 		rt.outputMessages = nil
+		rt.statusMessage = trackedMessage{}
 		rt.detachedOutputs = nil
 		rt.outputBackoffUntil = time.Time{}
 		rt.detachedBackoffUntil = time.Time{}
@@ -541,6 +549,7 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	rt.outputText = ""
 	rt.editBackoffUntil = time.Time{}
 	rt.editRateLimitCount = 0
+	rt.lastEditableSyncAt = time.Time{}
 	rt.deferBodyUntilIdle = false
 	rt.forcePlainOutput = false
 	rt.busySince = time.Now()
@@ -671,7 +680,7 @@ func (s *Service) poll(rt *groupRuntime) {
 		if shouldFlushOnSize(rt, s.editRolloverAt, maxMessageRunes) {
 			s.flushOutputBuffer(rt)
 		} else if becameIdle && strings.TrimSpace(rt.outputBuffer) != "" && s.editableMessenger() != nil {
-			s.flushOutputBuffer(rt)
+			s.flushOutputBufferForced(rt)
 		} else if shouldFlush(rt.outputBuffer, rt.outputBufferedAt, rt.outputBufferedTicks, s.flushIdleTicks, s.busyFlushAfter, now) {
 			s.flushOutputBuffer(rt)
 		}
@@ -684,8 +693,11 @@ func (s *Service) poll(rt *groupRuntime) {
 	busyChanged := rt.lastBusy != busy
 	rt.lastBusy = busy
 	if !busy {
+		if !rt.hasPendingOutputDelivery() {
+			s.clearWorkingStatus(rt)
+			rt.workingSent = false
+		}
 		rt.busySince = time.Time{}
-		rt.workingSent = false
 		rt.lastActionAt = time.Time{}
 		rt.interruptSentAt = time.Time{}
 		rt.forceInterruptSent = false
@@ -1215,13 +1227,12 @@ func (s *Service) prepareOutputForDispatch(rt *groupRuntime) {
 	if rt == nil {
 		return
 	}
+	s.clearWorkingStatus(rt)
 	rt.clearOutputBuffer()
 	rt.outputText = ""
 	rt.editRateLimitCount = 0
+	rt.lastEditableSyncAt = time.Time{}
 	rt.forcePlainOutput = false
-	if len(rt.outputMessages) == 1 && rt.outputMessages[0].text == workingStatusText {
-		return
-	}
 	rt.outputMessages = nil
 }
 
@@ -1248,6 +1259,7 @@ func (s *Service) detachBufferedOutput(rt *groupRuntime) {
 	rt.outputMessages = nil
 	rt.editBackoffUntil = time.Time{}
 	rt.detachedRetryCount = 0
+	rt.lastEditableSyncAt = time.Time{}
 }
 
 func (s *Service) sendWorkingStatus(rt *groupRuntime) {
@@ -1259,7 +1271,7 @@ func (s *Service) sendWorkingStatus(rt *groupRuntime) {
 		s.sendBestEffort(rt.opts.GroupID, workingStatusText)
 		return
 	}
-	if len(rt.outputMessages) > 0 {
+	if rt.statusMessage.messageID != "" {
 		return
 	}
 	msg, err := editable.SendTextToChatWithID(context.Background(), rt.opts.GroupID, workingStatusText)
@@ -1268,10 +1280,10 @@ func (s *Service) sendWorkingStatus(rt *groupRuntime) {
 		s.sendBestEffort(rt.opts.GroupID, workingStatusText)
 		return
 	}
-	rt.outputMessages = []trackedMessage{{
+	rt.statusMessage = trackedMessage{
 		messageID: msg.MessageID,
 		text:      workingStatusText,
-	}}
+	}
 }
 
 func (s *Service) sendChatAction(rt *groupRuntime) {
@@ -1294,6 +1306,14 @@ func (s *Service) sendChatAction(rt *groupRuntime) {
 }
 
 func (s *Service) flushOutputBuffer(rt *groupRuntime) {
+	s.flushOutputBufferMode(rt, false)
+}
+
+func (s *Service) flushOutputBufferForced(rt *groupRuntime) {
+	s.flushOutputBufferMode(rt, true)
+}
+
+func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 	if rt == nil {
 		return
 	}
@@ -1313,6 +1333,9 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 			return
 		}
 		rt.editBackoffUntil = time.Time{}
+	}
+	if editable != nil && len(rt.detachedOutputs) == 0 && !s.canSyncEditableOutput(rt, now, forceEditable) {
+		return
 	}
 	raw := rt.outputBuffer
 	bufferedAt := rt.outputBufferedAt
@@ -1367,15 +1390,16 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 		rt.outputText = candidateText
 		return
 	}
-	if err := s.syncEditableOutput(rt, editable, desiredText); err != nil {
+	if err := s.syncEditableOutput(rt, editable, desiredText, !forceEditable); err != nil {
 		if isMessageNotModifiedError(err) {
 			rt.outputText = candidateText
 			return
 		}
 		if shouldResetEditableThread(err) {
 			rt.outputMessages = nil
-			if retryErr := s.syncEditableOutput(rt, editable, desiredText); retryErr == nil {
+			if retryErr := s.syncEditableOutput(rt, editable, desiredText, false); retryErr == nil {
 				rt.outputText = candidateText
+				rt.lastEditableSyncAt = now
 				return
 			} else {
 				err = retryErr
@@ -1426,6 +1450,7 @@ func (s *Service) flushOutputBuffer(rt *groupRuntime) {
 	}
 	rt.outputText = candidateText
 	rt.editRateLimitCount = 0
+	rt.lastEditableSyncAt = now
 	rt.deferBodyUntilIdle = false
 	rt.forcePlainOutput = false
 	s.logOutputStateDebug(rt, "flush editable output committed")
@@ -1596,6 +1621,7 @@ func (rt *groupRuntime) hasRecoverableOutputState() bool {
 		rt.hasBufferedOutput() ||
 		strings.TrimSpace(rt.outputText) != "" ||
 		len(rt.outputMessages) > 0 ||
+		rt.statusMessage.messageID != "" ||
 		len(rt.detachedOutputs) > 0 ||
 		rt.promptEchoPending ||
 		!rt.outputBackoffUntil.IsZero() ||
@@ -1651,11 +1677,22 @@ func (rt *groupRuntime) publishedOutputText() string {
 	}
 }
 
+func (rt *groupRuntime) hasPendingOutputDelivery() bool {
+	if rt == nil {
+		return false
+	}
+	return rt.hasBufferedOutput() ||
+		len(rt.detachedOutputs) > 0 ||
+		!rt.outputBackoffUntil.IsZero() ||
+		!rt.detachedBackoffUntil.IsZero() ||
+		!rt.editBackoffUntil.IsZero()
+}
+
 func joinTrackedMessages(messages []trackedMessage) string {
 	var b strings.Builder
 	for _, msg := range messages {
 		text := strings.Trim(msg.text, "\n")
-		if strings.TrimSpace(text) == "" || text == workingStatusText {
+		if strings.TrimSpace(text) == "" {
 			continue
 		}
 		b.WriteString(text)
@@ -1725,6 +1762,10 @@ func (rt *groupRuntime) enqueueDetachedOutput(runID uint64, text string) {
 
 func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 	if rt == nil || len(rt.detachedOutputs) == 0 {
+		if rt != nil && !rt.runInFlight() && !rt.hasPendingOutputDelivery() {
+			s.clearWorkingStatus(rt)
+			rt.workingSent = false
+		}
 		return
 	}
 	now := time.Now()
@@ -1804,9 +1845,13 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 		rt.detachedRetryCount = 0
 		s.logOutputStateDebug(rt, "detached output committed")
 	}
+	if !rt.runInFlight() && !rt.hasPendingOutputDelivery() {
+		s.clearWorkingStatus(rt)
+		rt.workingSent = false
+	}
 }
 
-func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenger, desiredText string) error {
+func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenger, desiredText string, freezeCompleted bool) error {
 	segments := splitForEditMessages(desiredText, s.editRolloverAt, maxMessageRunes)
 	if len(segments) == 0 {
 		return nil
@@ -1822,6 +1867,9 @@ func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenge
 	for i, segment := range segments {
 		if i < len(next) {
 			if next[i].text == segment {
+				continue
+			}
+			if freezeCompleted && i < len(next)-1 {
 				continue
 			}
 			if err := editable.EditTextInChat(context.Background(), rt.opts.GroupID, next[i].messageID, segment); err != nil {
@@ -1845,6 +1893,44 @@ func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenge
 
 	rt.outputMessages = next
 	return nil
+}
+
+func (s *Service) canSyncEditableOutput(rt *groupRuntime, now time.Time, force bool) bool {
+	if rt == nil || force || s.editableSyncEvery <= 0 {
+		return true
+	}
+	if rt.lastEditableSyncAt.IsZero() {
+		return true
+	}
+	return now.Sub(rt.lastEditableSyncAt) >= s.editableSyncEvery
+}
+
+func (s *Service) clearWorkingStatus(rt *groupRuntime) {
+	if rt == nil || rt.statusMessage.messageID == "" {
+		return
+	}
+	editable := s.editableMessenger()
+	if editable == nil {
+		rt.statusMessage = trackedMessage{}
+		return
+	}
+	messageID := strings.TrimSpace(rt.statusMessage.messageID)
+	if messageID == "" {
+		rt.statusMessage = trackedMessage{}
+		return
+	}
+	if deleter, ok := editable.(DeleteMessenger); ok {
+		if err := deleter.DeleteMessageInChat(context.Background(), rt.opts.GroupID, messageID); err == nil {
+			rt.statusMessage = trackedMessage{}
+			return
+		} else {
+			s.logger.Warn("delete working message failed", "group_id", rt.opts.GroupID, "message_id", messageID, "err", err)
+		}
+	}
+	if err := editable.EditTextInChat(context.Background(), rt.opts.GroupID, messageID, "…"); err != nil {
+		s.logger.Warn("neutralize working message failed", "group_id", rt.opts.GroupID, "message_id", messageID, "err", err)
+	}
+	rt.statusMessage = trackedMessage{}
 }
 
 func (s *Service) pruneStaleEditableMessages(rt *groupRuntime, editable EditableMessenger, stale []trackedMessage) {

@@ -311,6 +311,7 @@ func TestServiceBridgesMessageToConsole(t *testing.T) {
 	messenger := &fakeMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -654,6 +655,7 @@ func TestServiceForwardsTransientDisconnectDuringNormalReply(t *testing.T) {
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -697,6 +699,7 @@ func TestServiceStreamsScrolledSnapshotWithoutRepeatingPrefix(t *testing.T) {
 	messenger := &fakeMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -740,6 +743,7 @@ func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	messenger := &fakeMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -782,6 +786,7 @@ func TestServiceDoesNotForwardMultilinePromptEchoTail(t *testing.T) {
 	messenger := &fakeMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -854,6 +859,7 @@ func TestServiceDoesNotForwardWrappedSingleLinePromptEchoTail(t *testing.T) {
 	messenger := &fakeMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -947,7 +953,7 @@ func TestSuppressPromptEchoPrefixDoesNotStripSuffixOnlyMatch(t *testing.T) {
 	}
 }
 
-func TestServiceEditableMessengerEditsWorkingMessageIntoReply(t *testing.T) {
+func TestServiceEditableMessengerKeepsWorkingMessageSeparateFromReply(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -964,6 +970,7 @@ func TestServiceEditableMessengerEditsWorkingMessageIntoReply(t *testing.T) {
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -984,12 +991,55 @@ func TestServiceEditableMessengerEditsWorkingMessageIntoReply(t *testing.T) {
 	})
 
 	if got := nonStatusMessages(messenger.all()); len(got) != 1 || got[0] != "• final reply" {
-		t.Fatalf("messages = %#v, want single edited final reply", got)
+		t.Fatalf("messages = %#v, want single final reply body", got)
 	}
 	events := messenger.allEvents()
 	joinedEvents := strings.Join(events, "\n")
-	if !strings.Contains(joinedEvents, "send:") || !strings.Contains(joinedEvents, workingStatusText) || !strings.Contains(joinedEvents, "edit:") || !strings.Contains(joinedEvents, "• final reply") {
-		t.Fatalf("events = %#v, want send working then edit final reply", events)
+	if !strings.Contains(joinedEvents, "send:") || !strings.Contains(joinedEvents, workingStatusText) || !strings.Contains(joinedEvents, "• final reply") {
+		t.Fatalf("events = %#v, want working send and body send", events)
+	}
+	if !strings.Contains(joinedEvents, "delete:1") {
+		t.Fatalf("events = %#v, want working message cleaned up on idle", events)
+	}
+}
+
+func TestServiceEditableOutputRespectsSyncInterval(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 50 * time.Millisecond
+
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            5,
+		nextRunID:        5,
+		outputBuffer:     "• first",
+		outputBufferedAt: time.Now(),
+	}
+
+	svc.flushOutputBuffer(rt)
+	if got := len(nonStatusMessages(messenger.all())); got != 1 {
+		t.Fatalf("len(messages) = %d, want first body sent", got)
+	}
+
+	rt.outputBuffer = "\n• second"
+	rt.outputBufferedAt = time.Now()
+	beforeEdits := messenger.editCount()
+	svc.flushOutputBuffer(rt)
+
+	if got := messenger.editCount(); got != beforeEdits {
+		t.Fatalf("editCount = %d, want no edit inside sync interval", got)
+	}
+	if got := strings.TrimSpace(rt.outputBuffer); got != "• second" {
+		t.Fatalf("outputBuffer = %q, want pending tail retained inside sync interval", got)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	svc.flushOutputBuffer(rt)
+
+	if got := messenger.editCount(); got <= beforeEdits {
+		t.Fatalf("editCount = %d, want edit after sync interval", got)
 	}
 }
 
@@ -1012,6 +1062,7 @@ func TestServiceSendsChatActionWhileWaitingForFirstVisibleReply(t *testing.T) {
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1054,6 +1105,7 @@ func TestServiceEditableMessengerRollsOverLongReply(t *testing.T) {
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1098,6 +1150,7 @@ func TestServiceEditableMessengerFlushesImmediatelyOnRolloverThreshold(t *testin
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1142,6 +1195,7 @@ func TestServiceEditableMessengerKeepsPreviousReplyWhenNewRequestStarts(t *testi
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1199,6 +1253,7 @@ func TestServiceEditableMessengerRecoversBufferedReplyAfterReset(t *testing.T) {
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1247,6 +1302,7 @@ func TestServiceEditableMessengerFlushesBufferedReplyWhileBusy(t *testing.T) {
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1268,10 +1324,10 @@ func TestServiceEditableMessengerFlushesBufferedReplyWhileBusy(t *testing.T) {
 	})
 
 	events := strings.Join(messenger.allEvents(), "\n")
-	if !strings.Contains(events, "edit:1:• alpha") {
+	if !strings.Contains(events, "send:2:• alpha") {
 		t.Fatalf("events = %#v, want busy flush for first partial reply", messenger.allEvents())
 	}
-	if !strings.Contains(events, "edit:1:• alpha\n\n• beta") {
+	if !strings.Contains(events, "edit:2:• alpha\n\n• beta") {
 		t.Fatalf("events = %#v, want busy flush for second partial reply", messenger.allEvents())
 	}
 }
@@ -1294,6 +1350,7 @@ func TestServiceEditableMessengerFlushesBufferedReplyImmediatelyWhenBusyEnds(t *
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1352,12 +1409,15 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 		},
 	}
 	messenger := &fakeEditableMessenger{
-		editErrs: []error{
+		sendErrs: []error{
+			nil,
 			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 1 retry_after=1"),
+			nil,
 		},
 	}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1373,19 +1433,19 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 	}
 
 	waitFor(t, 500*time.Millisecond, func() bool {
-		return messenger.editCount() >= 1
+		return strings.Contains(strings.Join(messenger.allEvents(), "\n"), workingStatusText)
 	})
 	time.Sleep(200 * time.Millisecond)
-	if got := messenger.editCount(); got != 1 {
-		t.Fatalf("editCount after backoff window check = %d, want 1", got)
+	if got := len(nonStatusMessages(messenger.all())); got != 0 {
+		t.Fatalf("len(messages) after early backoff window = %d, want 0 body chunks before retry", got)
 	}
 
 	waitFor(t, 2*time.Second, func() bool {
 		got := nonStatusMessages(messenger.all())
 		return len(got) == 1 && got[0] == "• first\n\n• second"
 	})
-	if got := messenger.editCount(); got < 2 {
-		t.Fatalf("editCount = %d, want retry after retry_after window", got)
+	if events := strings.Join(messenger.allEvents(), "\n"); !strings.Contains(events, "send:2:• first\n\n• second") {
+		t.Fatalf("events = %#v, want body send retried after retry_after window", messenger.allEvents())
 	}
 }
 
@@ -1401,6 +1461,7 @@ func TestServiceSyncEditableOutputPrunesStaleMessagesOnSegmentShrink(t *testing.
 		},
 	}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.editRolloverAt = 100
 	rt := &groupRuntime{
 		opts: svc.opts,
@@ -1411,7 +1472,7 @@ func TestServiceSyncEditableOutputPrunesStaleMessagesOnSegmentShrink(t *testing.
 		},
 	}
 
-	if err := svc.syncEditableOutput(rt, messenger, "final single segment"); err != nil {
+	if err := svc.syncEditableOutput(rt, messenger, "final single segment", false); err != nil {
 		t.Fatalf("syncEditableOutput() error = %v", err)
 	}
 
@@ -1440,6 +1501,7 @@ func TestServiceEditableRateLimitBlocksDetachedFlushViaSharedOutputBackoff(t *te
 		},
 	}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
 		opts:             svc.opts,
 		runID:            5,
@@ -1486,6 +1548,7 @@ func TestServiceDetachedRateLimitBlocksEditableFlushViaSharedOutputBackoff(t *te
 		},
 	}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
 		opts: svc.opts,
 		outputMessages: []trackedMessage{
@@ -1531,12 +1594,15 @@ func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 		},
 	}
 	messenger := &fakeEditableMessenger{
-		editErrs: []error{
+		sendErrs: []error{
+			nil,
 			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 1 retry_after=1"),
+			nil,
 		},
 	}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -1552,7 +1618,7 @@ func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 	}
 
 	waitFor(t, 500*time.Millisecond, func() bool {
-		return messenger.editCount() >= 1
+		return strings.Contains(strings.Join(messenger.allEvents(), "\n"), workingStatusText)
 	})
 
 	if err := svc.HandleMessage(context.Background(), IncomingMessage{
@@ -1590,6 +1656,7 @@ func TestServiceFlushOutputBufferDefersWhileRunInFlightAfterEditableRateLimit(t 
 		},
 	}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
 		opts:               svc.opts,
 		runID:              7,
@@ -1631,6 +1698,7 @@ func TestServiceFlushOutputBufferAllowsIdleFlushAfterEditableRateLimit(t *testin
 		},
 	}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
 		opts:               svc.opts,
 		runID:              7,
@@ -1668,6 +1736,7 @@ func TestServicePollDuringDeferredBodyUntilIdleTracksLatestSnapshotOnly(t *testi
 	}
 	messenger := &fakeEditableMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.busyFlushAfter = time.Hour
 	svc.flushIdleTicks = 100
 
@@ -1784,6 +1853,7 @@ func TestServiceEditableMessengerVeryLongReplyNoLoss(t *testing.T) {
 	messenger := &fakeEditableMessenger{}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 4000
 	svc.startWait = 0
@@ -1846,6 +1916,7 @@ func TestServiceDetachedOutputDoesNotDropByCursor(t *testing.T) {
 
 	messenger := &fakeMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
 		opts: svc.opts,
 		runCursorCommitted: map[uint64]int{
@@ -1911,6 +1982,7 @@ func TestServiceOutputWatchdogKeepsBufferedTailWhenEditBackoffBlocks(t *testing.
 
 	messenger := &fakeEditableMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.outputWatchdogAfter = 10 * time.Millisecond
 
 	rt := &groupRuntime{
@@ -1945,6 +2017,7 @@ func TestServiceOutputWatchdogKeepsBufferedTailDuringActiveRunWhenEditBackoffBlo
 
 	messenger := &fakeEditableMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.outputWatchdogAfter = 10 * time.Millisecond
 
 	rt := &groupRuntime{
@@ -1991,6 +2064,7 @@ func TestServiceFallsBackToPlainOutputAfterRepeatedEditableRateLimits(t *testing
 		},
 	}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
 		opts:             svc.opts,
 		runID:            9,
@@ -2031,6 +2105,7 @@ func TestServiceDispatchNextDrainsBufferedTailBeforeRunSwitchEvenDuringEditBacko
 	console := &fakeConsole{captures: []string{""}}
 	messenger := &fakeEditableMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
 		opts:               svc.opts,
 		session:            svc.opts.SessionName,
@@ -2066,46 +2141,36 @@ func TestServiceDispatchNextDrainsBufferedTailBeforeRunSwitchEvenDuringEditBacko
 func TestServiceEditableMessengerDoesNotRetryWhenMessageNotModified(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	console := &fakeConsole{
-		captures: []string{
-			"",
-			"• Working (1s • esc to interrupt)",
-			"• first",
-			"• first",
-			"• first",
-			"• first",
-		},
-	}
 	messenger := &fakeEditableMessenger{
+		nextID: 1,
+		messages: []trackedMessage{
+			{messageID: "1", text: "• first"},
+		},
 		editErrs: []error{
 			errors.New("telegram api failed: http=400 code=400 desc=Bad Request: message is not modified"),
 		},
 	}
 
-	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
-	svc.pollEvery = 5 * time.Millisecond
-	svc.history = 2000
-	svc.startWait = 0
-	svc.workingAfter = 5 * time.Millisecond
-	svc.flushIdleTicks = 1
-
-	if err := svc.HandleMessage(context.Background(), IncomingMessage{
-		MessageID: "om_1",
-		GroupID:   "oc_1",
-		Text:      "hello",
-	}); err != nil {
-		t.Fatalf("HandleMessage() error = %v", err)
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            3,
+		nextRunID:        3,
+		outputBuffer:     "• first",
+		outputBufferedAt: time.Now(),
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• stale"},
+		},
 	}
 
-	waitFor(t, 500*time.Millisecond, func() bool {
-		return messenger.editCount() >= 1
-	})
-	time.Sleep(200 * time.Millisecond)
+	svc.flushOutputBuffer(rt)
+
 	if got := messenger.editCount(); got != 1 {
-		t.Fatalf("editCount = %d, want 1 without retry loop on message-not-modified", got)
+		t.Fatalf("editCount = %d, want single attempt without retry loop", got)
+	}
+	if got := rt.outputText; got != "• first" {
+		t.Fatalf("outputText = %q, want committed candidate text after message-not-modified", got)
 	}
 }
 
@@ -2172,46 +2237,33 @@ func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 func TestServiceEditableMessengerResetsThreadWhenMessageToEditMissing(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	console := &fakeConsole{
-		captures: []string{
-			"",
-			"• Working (1s • esc to interrupt)",
-			"• first",
-			"• first\n\n• second",
-			"• first\n\n• second",
-		},
-	}
 	messenger := &fakeEditableMessenger{
+		nextID: 1,
+		messages: []trackedMessage{
+			{messageID: "1", text: "• first"},
+		},
 		editErrs: []error{
 			errors.New("telegram api failed: http=400 code=400 desc=Bad Request: message to edit not found"),
 		},
 	}
 
-	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
-	svc.pollEvery = 5 * time.Millisecond
-	svc.history = 2000
-	svc.startWait = 0
-	svc.workingAfter = 5 * time.Millisecond
-	svc.flushIdleTicks = 1
-
-	if err := svc.HandleMessage(context.Background(), IncomingMessage{
-		MessageID: "om_1",
-		GroupID:   "oc_1",
-		Text:      "hello",
-	}); err != nil {
-		t.Fatalf("HandleMessage() error = %v", err)
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            4,
+		nextRunID:        4,
+		outputBuffer:     "• first\n\n• second",
+		outputBufferedAt: time.Now(),
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• stale"},
+		},
 	}
 
-	waitFor(t, 500*time.Millisecond, func() bool {
-		got := nonStatusMessages(messenger.all())
-		return len(got) == 1 && got[0] == "• first\n\n• second"
-	})
+	svc.flushOutputBuffer(rt)
 
 	events := strings.Join(messenger.allEvents(), "\n")
-	if !strings.Contains(events, "send:2:• first") {
+	if !strings.Contains(events, "send:2:• first\n\n• second") {
 		t.Fatalf("events = %#v, want fallback send on missing editable message", messenger.allEvents())
 	}
 }
@@ -2460,6 +2512,7 @@ func TestServiceDispatchNextFinalizesTailBeforeNextPrompt(t *testing.T) {
 	}
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
 		opts:         svc.opts,
 		session:      svc.opts.SessionName,

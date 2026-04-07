@@ -1,6 +1,18 @@
 # Platform defaults to lark when omitted.
 platform: lark
 
+# Runtime defaults to host-codex when omitted.
+# Supported values:
+#   host-codex
+#   docker-codex
+#   docker-claude
+# runtime: host-codex
+
+# Optional read-only agent config seed used by docker-* runtime shortcuts.
+# The wrapper copies this directory into the container-local agent home before
+# starting the CLI.
+# runtime_config_dir: ~/.codex
+
 # Lark / Feishu
 # Use https://open.feishu.cn for Feishu China tenants.
 lark_app_id: cli_xxx
@@ -11,9 +23,9 @@ lark_base_url: https://open.larksuite.com
 # telegram_bot_token: 123456:ABCDEF
 # telegram_base_url: https://api.telegram.org
 
-# Optional 2.0 global agent runtime override.
-# If omitted, imcodex keeps the legacy host-side codex launch path.
-# session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+# Optional low-level escape hatch.
+# If set, this overrides the higher-level runtime shortcut above.
+# session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex --config-dir '/home/ubuntu/.codex'
 
 interrupt_on_new_message: true
 

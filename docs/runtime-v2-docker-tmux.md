@@ -29,8 +29,10 @@ Compatibility rules:
 
 In concrete terms:
 
-- omit `session_command` -> host `codex` in `tmux`
-- set `session_command` -> external wrapper decides Docker/Codex/Claude path
+- omit both `runtime` and `session_command` -> host `codex` in `tmux`
+- set `runtime: docker-codex` -> default Docker wrapper path for Codex
+- set `runtime: docker-claude` -> default Docker wrapper path for Claude
+- set `session_command` -> explicit escape hatch overrides the higher-level runtime shortcut
 
 ## Recommendation
 
@@ -91,6 +93,7 @@ Recommended container properties:
 - set container working directory to that mount, for example `/workspace`
 - do not mount host `$HOME`
 - do not mount parent directories of the workspace
+- optionally copy one read-only host config dir into the container-local agent home
 - do not mount the host Docker socket
 - provide a container-local home directory such as `/home/agent`
 - pass only the minimal credentials required by the chosen agent
@@ -138,14 +141,17 @@ Example responsibility split:
 
 The minimum useful change is:
 
-- optional global `session_command`
+- optional global `runtime`
+- optional global `runtime_config_dir`
+- optional global `session_command` escape hatch
 - optional per-group `session_name`
 - optional per-job `session_name` for `prompt_file` jobs
 
 Example shape:
 
 ```yaml
-session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
+runtime: docker-codex
+runtime_config_dir: ~/.codex
 
 groups:
   - group_id: -1001234567890
@@ -158,14 +164,16 @@ groups:
         session_name: imcodex-job-my-project-claude-review
 ```
 
-Template variables should stay small and explicit:
+The shorthand assumes `imcodex-agent-run` is in `PATH`.
+
+Template variables for the escape hatch should stay small and explicit:
 
 - `{cwd}`
 - `{session_name}`
 - `{group_id}`
 
-If `session_command` is omitted, the current built-in host-side Codex launch
-behavior should remain the default.
+If both `runtime` and `session_command` are omitted, the current built-in
+host-side Codex launch behavior should remain the default.
 
 That default is the compatibility bridge for old 1.x config files.
 
@@ -177,8 +185,9 @@ The wrapper script should:
 2. Derive a stable container name from session or workspace.
 3. Start or reuse the container runtime.
 4. Mount only the workspace into the container.
-5. Inject only agent-specific credentials and config.
-6. `exec` either Codex or Claude Code in the container.
+5. Optionally copy a read-only host config seed into the container-local agent home.
+6. Inject only agent-specific credentials and config.
+7. `exec` either Codex or Claude Code in the container.
 
 For Codex, the wrapper can safely use a fully autonomous mode inside the
 container because Docker is the outer isolation boundary.

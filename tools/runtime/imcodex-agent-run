@@ -5,6 +5,7 @@ agent=""
 workspace=""
 session=""
 image=""
+config_dir=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -22,6 +23,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --image)
       image="${2:-}"
+      shift 2
+      ;;
+    --config-dir)
+      config_dir="${2:-}"
       shift 2
       ;;
     *)
@@ -43,15 +48,21 @@ if [[ ! -d "$workspace" ]]; then
   echo "workspace does not exist: $workspace" >&2
   exit 1
 fi
+if [[ -n "$config_dir" && ! -d "$config_dir" ]]; then
+  echo "config dir does not exist: $config_dir" >&2
+  exit 1
+fi
 
 case "$agent" in
   codex)
     image="${image:-imcodex-agent-codex:0.118.0}"
-    entrypoint=(codex --no-alt-screen -C /workspace)
+    config_target="/home/agent/.codex"
+    agent_command="exec codex --no-alt-screen -C /workspace"
     ;;
   claude)
     image="${image:-imcodex-agent-claude:2.1.92}"
-    entrypoint=(claude)
+    config_target="/home/agent/.claude"
+    agent_command="exec claude"
     ;;
   *)
     echo "unsupported agent: $agent" >&2
@@ -64,13 +75,22 @@ if [[ -z "$container_name" ]]; then
   container_name="imcodex-agent"
 fi
 
-exec docker run --rm -it \
-  --name "$container_name" \
-  --hostname "$container_name" \
-  --workdir /workspace \
-  --mount "type=bind,src=$workspace,dst=/workspace" \
-  --tmpfs /tmp:exec,mode=1777 \
-  -e HOME=/home/agent \
-  -e CODEX_HOME=/home/agent/.codex \
+entrypoint_script="mkdir -p '$config_target'; if [[ -d /config-ro ]]; then cp -a /config-ro/. '$config_target'/; fi; $agent_command"
+docker_args=(
+  run --rm -it
+  --name "$container_name"
+  --hostname "$container_name"
+  --workdir /workspace
+  --mount "type=bind,src=$workspace,dst=/workspace"
+  --tmpfs /tmp:exec,mode=1777
+  -e HOME=/home/agent
+  -e CODEX_HOME=/home/agent/.codex
+)
+if [[ -n "$config_dir" ]]; then
+  docker_args+=(--mount "type=bind,src=$config_dir,dst=/config-ro,readonly")
+fi
+
+exec docker \
+  "${docker_args[@]}" \
   "$image" \
-  "${entrypoint[@]}"
+  bash -lc "$entrypoint_script"
