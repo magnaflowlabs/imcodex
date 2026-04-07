@@ -185,7 +185,7 @@ Key properties of this model:
 
 ## Compatibility
 
-`v2.0.2` keeps the old config behavior:
+`v2.1.0` keeps the old config behavior:
 
 - if both `runtime` and `session_command` are omitted, `imcodex` uses the legacy host-side `codex`
   launch path
@@ -364,7 +364,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 2.0.2 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 2.1.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior
