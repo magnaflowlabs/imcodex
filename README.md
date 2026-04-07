@@ -55,12 +55,23 @@ docker --version
 Build the example images shipped in this repo:
 
 ```bash
-docker build -t imcodex-agent-codex:latest -f tools/runtime/Dockerfile.codex .
-docker build -t imcodex-agent-claude:latest -f tools/runtime/Dockerfile.claude .
+docker build --build-arg CODEX_VERSION=0.118.0 -t imcodex-agent-codex:0.118.0 -f tools/runtime/Dockerfile.codex .
+docker build --build-arg CLAUDE_CODE_VERSION=2.1.92 -t imcodex-agent-claude:2.1.92 -f tools/runtime/Dockerfile.claude .
 ```
 
 This is the recommended path because it keeps the agent confined to one
 workspace mount instead of running directly on the host.
+
+Recommended update policy:
+
+- do not use `latest` in long-lived runtime images
+- pin Codex and Claude Code to known-good versions
+- rebuild and roll out images only during a maintenance window
+- treat CLI upgrades as an explicit release step, not something the live agent
+  decides during startup
+
+If you want the runtime to stop getting interrupted by upgrade prompts, prefer
+this Docker mode over host-installed CLIs.
 
 #### Legacy Host Mode: Codex On Host
 
@@ -71,6 +82,15 @@ npm install -g @openai/codex
 codex login
 codex --version
 ```
+
+Host Codex mode is still supported in 2.x. If `session_command` is omitted
+from the config, `imcodex` launches `codex` directly in `tmux`, which is the
+same compatibility path as 1.x.
+
+If Codex asks for `npm install -g @openai/codex@latest` during startup, do not
+let the live runtime self-upgrade in the middle of production traffic. Upgrade
+it during a maintenance window instead, or switch the deployment to the pinned
+Docker runtime above.
 
 #### Optional Host Install: Claude Code
 
@@ -84,6 +104,14 @@ claude --version
 
 The 2.0 runtime design still recommends running Claude inside Docker rather
 than on the host.
+
+If you do run Claude on the host and want to stop startup auto-update prompts,
+Anthropic documents two supported options:
+
+```bash
+claude config set autoUpdates false --global
+export DISABLE_AUTOUPDATER=1
+```
 
 ## Runtime 2.0 Quickstart
 
@@ -101,6 +129,11 @@ The repo includes a host wrapper script for this model:
 chmod +x tools/runtime/imcodex-agent-run
 bash -n tools/runtime/imcodex-agent-run
 ```
+
+The shipped wrapper defaults to pinned image tags:
+
+- `imcodex-agent-codex:0.118.0`
+- `imcodex-agent-claude:2.1.92`
 
 Codex group session example:
 
@@ -133,6 +166,15 @@ Key properties of this model:
 - only the configured `cwd` is mounted into `/workspace`
 - the host home directory is not mounted by default
 - existing 1.x configs continue to work if `session_command` is omitted
+
+## Compatibility
+
+`v2.0.2` keeps the old config behavior:
+
+- if `session_command` is omitted, `imcodex` uses the legacy host-side `codex`
+  launch path
+- existing 1.x configs without any 2.0 runtime fields remain valid
+- adding `session_command` is an opt-in switch to the Docker-backed runtime
 
 ## Group IDs
 
@@ -303,7 +345,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 2.0.1 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 2.0.2 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior
@@ -335,6 +377,24 @@ Codex or Claude execution into a workspace-confined Docker runtime, see
 1.x configs remain valid; the new global `session_command` field is optional. Example
 wrapper and Docker image assets live in
 [docs/runtime-v2-examples.md](docs/runtime-v2-examples.md).
+
+### Codex Or Claude Keeps Asking To Upgrade
+
+Recommended handling:
+
+1. Do not use `latest` in the runtime image or wrapper defaults.
+2. Pin a known-good CLI version in Docker.
+3. Rebuild and redeploy only during a maintenance window.
+4. For host-side Claude, disable automatic updater prompts if needed.
+5. For host-side Codex, treat upgrades as manual maintenance, not an
+   interactive runtime action.
+
+Operationally, the simplest stable approach is:
+
+- host `imcodex`
+- host `tmux`
+- pinned Docker image for `codex` or `claude`
+- no live `npm install -g ...@latest` inside production sessions
 
 ## Inspect Sessions
 

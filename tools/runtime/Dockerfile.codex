@@ -1,10 +1,12 @@
 FROM node:20-bookworm-slim
 
+ARG CODEX_VERSION=0.118.0
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex
+RUN npm install -g @openai/codex@${CODEX_VERSION}
 
 RUN useradd -m -u 1000 agent
 USER agent
@@ -12,5 +14,6 @@ WORKDIR /workspace
 
 ENV HOME=/home/agent
 ENV CODEX_HOME=/home/agent/.codex
+ENV IMCODEX_CODEX_VERSION=${CODEX_VERSION}
 
 CMD ["codex", "--no-alt-screen", "-C", "/workspace"]

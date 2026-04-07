@@ -136,6 +136,25 @@ groups:
 	}
 }
 
+func TestParseConfigKeepsLegacyModeWhenSessionCommandIsOmitted(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if cfg.sessionCommand != "" {
+		t.Fatalf("sessionCommand = %q, want empty legacy default", cfg.sessionCommand)
+	}
+}
+
 func TestParseConfigReadsInterruptOnNewMessage(t *testing.T) {
 	t.Parallel()
 
