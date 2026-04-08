@@ -187,6 +187,27 @@ func (h *blockingHandler) allStarted() []string {
 	return out
 }
 
+type erroringHandler struct {
+	mu        sync.Mutex
+	started   []string
+	errByText map[string]error
+}
+
+func (h *erroringHandler) HandleMessage(_ context.Context, msg gateway.IncomingMessage) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.started = append(h.started, msg.Text)
+	return h.errByText[msg.Text]
+}
+
+func (h *erroringHandler) allStarted() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, len(h.started))
+	copy(out, h.started)
+	return out
+}
+
 func TestReceiverProcessesBatchByChatSerialOrder(t *testing.T) {
 	t.Parallel()
 
@@ -314,6 +335,34 @@ func TestReceiverAdvancesOffsetAfterBatchCompletes(t *testing.T) {
 	case <-done:
 	case <-time.After(300 * time.Millisecond):
 		t.Fatal("Start() did not stop after cancel")
+	}
+}
+
+func TestReceiverContinuesAfterHandlerError(t *testing.T) {
+	t.Parallel()
+
+	handler := &erroringHandler{
+		errByText: map[string]error{
+			"bad": errors.New("boom"),
+		},
+	}
+	receiver := NewReceiver(&fakeUpdateClient{}, handler, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := receiver.processBatch(ctx, []Update{
+		{UpdateID: 4, Message: &Message{MessageID: 1, Chat: Chat{ID: -1, Type: "group"}, Text: "bad"}},
+		{UpdateID: 5, Message: &Message{MessageID: 2, Chat: Chat{ID: -1, Type: "group"}, Text: "good"}},
+	})
+	if err != nil {
+		t.Fatalf("processBatch() error = %v, want handler error logged and swallowed", err)
+	}
+	if got, want := receiver.offset, int64(6); got != want {
+		t.Fatalf("offset = %d, want %d after batch", got, want)
+	}
+	if got := handler.allStarted(); len(got) != 2 || got[0] != "bad" || got[1] != "good" {
+		t.Fatalf("started = %#v, want both messages handled despite first error", got)
 	}
 }
 

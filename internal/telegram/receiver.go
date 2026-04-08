@@ -163,7 +163,13 @@ func (r *Receiver) handleUpdate(ctx context.Context, update Update) error {
 	if !ok {
 		return nil
 	}
-	return r.handler.HandleMessage(ctx, msg)
+	if err := r.handler.HandleMessage(ctx, msg); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		r.logger.Warn("telegram update handle failed", "update_id", update.UpdateID, "message_id", msg.MessageID, "group_id", msg.GroupID, "err", err)
+	}
+	return nil
 }
 
 func updateWorkerKey(update Update) string {
