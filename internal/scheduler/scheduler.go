@@ -23,16 +23,16 @@ import (
 const maxMessageRunes = 3000
 
 type Job struct {
-	GroupID        string
-	CWD            string
-	Name           string
-	Schedule       string
-	PromptFile     string
-	Command        string
-	ArtifactsDir   string
-	SummaryFile    string
-	SessionName    string
-	SessionCommand string
+	GroupID       string
+	CWD           string
+	Name          string
+	Schedule      string
+	PromptFile    string
+	Command       string
+	ArtifactsDir  string
+	SummaryFile   string
+	SessionName   string
+	LaunchCommand string
 }
 
 type Console interface {
@@ -201,7 +201,7 @@ func (j *jobRunner) runPrompt(ctx context.Context) error {
 		CWD:                         j.job.CWD,
 		GroupID:                     j.job.GroupID,
 		JobName:                     j.job.Name,
-		LaunchCommand:               j.job.SessionCommand,
+		LaunchCommand:               j.job.LaunchCommand,
 		StartupWait:                 j.startWait,
 		AutoPressEnterOnTrustPrompt: true,
 	}); err != nil {
@@ -370,7 +370,7 @@ func normalizeJob(job Job) Job {
 	job.ArtifactsDir = strings.TrimSpace(job.ArtifactsDir)
 	job.SummaryFile = strings.TrimSpace(job.SummaryFile)
 	job.SessionName = strings.TrimSpace(job.SessionName)
-	job.SessionCommand = strings.TrimSpace(job.SessionCommand)
+	job.LaunchCommand = strings.TrimSpace(job.LaunchCommand)
 	if job.SessionName == "" {
 		job.SessionName = DefaultSessionName(job.GroupID, job.CWD, job.Name)
 	}

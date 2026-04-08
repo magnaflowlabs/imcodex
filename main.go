@@ -16,10 +16,22 @@ import (
 )
 
 func main() {
+	if handled, err := maybeRunInternalCommand(os.Args[1:]); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	cfg, err := parseConfig(os.Args[1:], os.LookupEnv, os.ReadFile)
 	if err != nil {
 		log.Fatal(err)
 	}
+	launchCommand, resolvedCodexConfigDir, err := resolveLaunchCommand(cfg.runtime, cfg.codexConfigDir, mustExecutablePath(), os.LookupEnv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cfg.codexConfigDir = resolvedCodexConfigDir
 
 	releaseLock, err := acquireProcessLock(cfg.path)
 	if err != nil {
@@ -36,7 +48,7 @@ func main() {
 			GroupID:               group.GroupID,
 			CWD:                   group.CWD,
 			SessionName:           firstNonEmpty(group.SessionName, gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD)),
-			SessionCommand:        cfg.sessionCommand,
+			LaunchCommand:         launchCommand,
 			InterruptOnNewMessage: cfg.interruptOnNewMessage,
 		})
 	}
@@ -47,16 +59,17 @@ func main() {
 		baseURL    string
 	)
 
-	router, err := buildRouter(ctx, cfg, options, console, &startFuncs, &baseURL)
+	router, err := buildRouter(ctx, cfg, launchCommand, options, console, &startFuncs, &baseURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	log.Printf(
-		"imcodex %s started: config=%s platform=%s groups=%d jobs=%d base=%s",
+		"imcodex %s started: config=%s platform=%s runtime=%s groups=%d jobs=%d base=%s",
 		appVersion,
 		cfg.path,
 		cfg.platform,
+		cfg.runtime,
 		router.GroupCount(),
 		countJobs(cfg.groups),
 		baseURL,
@@ -72,7 +85,7 @@ func main() {
 	<-ctx.Done()
 }
 
-func buildRouter(ctx context.Context, cfg config, options []gateway.Options, console gateway.Console, startFuncs *[]func(context.Context) error, baseURL *string) (*gateway.Router, error) {
+func buildRouter(ctx context.Context, cfg config, launchCommand string, options []gateway.Options, console gateway.Console, startFuncs *[]func(context.Context) error, baseURL *string) (*gateway.Router, error) {
 	switch cfg.platform {
 	case "telegram":
 		tgClient := telegram.NewClient(cfg.telegramBotToken, cfg.telegramBaseURL)
@@ -80,7 +93,7 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 		if err != nil {
 			return nil, err
 		}
-		if runner, err := buildScheduler(cfg, tgClient, console); err != nil {
+		if runner, err := buildScheduler(cfg, launchCommand, tgClient, console); err != nil {
 			return nil, err
 		} else if runner != nil {
 			*startFuncs = append(*startFuncs, runner.Start)
@@ -99,7 +112,7 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 		if err != nil {
 			return nil, err
 		}
-		if runner, err := buildScheduler(cfg, larkClient, console); err != nil {
+		if runner, err := buildScheduler(cfg, launchCommand, larkClient, console); err != nil {
 			return nil, err
 		} else if runner != nil {
 			*startFuncs = append(*startFuncs, runner.Start)
@@ -115,33 +128,41 @@ func buildRouter(ctx context.Context, cfg config, options []gateway.Options, con
 	}
 }
 
-func buildScheduler(cfg config, messenger gateway.Messenger, console gateway.Console) (*scheduler.Runner, error) {
-	jobs := buildScheduledJobs(cfg)
+func buildScheduler(cfg config, launchCommand string, messenger gateway.Messenger, console gateway.Console) (*scheduler.Runner, error) {
+	jobs := buildScheduledJobs(cfg, launchCommand)
 	if len(jobs) == 0 {
 		return nil, nil
 	}
 	return scheduler.New(jobs, messenger, console, nil)
 }
 
-func buildScheduledJobs(cfg config) []scheduler.Job {
+func buildScheduledJobs(cfg config, launchCommand string) []scheduler.Job {
 	jobs := make([]scheduler.Job, 0)
 	for _, group := range cfg.groups {
 		for _, job := range group.Jobs {
 			jobs = append(jobs, scheduler.Job{
-				GroupID:        group.GroupID,
-				CWD:            group.CWD,
-				Name:           job.Name,
-				Schedule:       job.Schedule,
-				PromptFile:     job.PromptFile,
-				Command:        job.Command,
-				ArtifactsDir:   job.ArtifactsDir,
-				SummaryFile:    job.SummaryFile,
-				SessionName:    firstNonEmpty(job.SessionName, scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name)),
-				SessionCommand: cfg.sessionCommand,
+				GroupID:       group.GroupID,
+				CWD:           group.CWD,
+				Name:          job.Name,
+				Schedule:      job.Schedule,
+				PromptFile:    job.PromptFile,
+				Command:       job.Command,
+				ArtifactsDir:  job.ArtifactsDir,
+				SummaryFile:   job.SummaryFile,
+				SessionName:   firstNonEmpty(job.SessionName, scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name)),
+				LaunchCommand: launchCommand,
 			})
 		}
 	}
 	return jobs
+}
+
+func mustExecutablePath() string {
+	path, err := os.Executable()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return path
 }
 
 func countJobs(groups []groupConfig) int {

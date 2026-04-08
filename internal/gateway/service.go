@@ -58,7 +58,7 @@ type Options struct {
 	GroupID               string
 	CWD                   string
 	SessionName           string
-	SessionCommand        string
+	LaunchCommand         string
 	InterruptOnNewMessage bool
 }
 
@@ -370,7 +370,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		SessionName:                 rt.session,
 		CWD:                         rt.opts.CWD,
 		GroupID:                     rt.opts.GroupID,
-		LaunchCommand:               rt.opts.SessionCommand,
+		LaunchCommand:               rt.opts.LaunchCommand,
 		StartupWait:                 s.startWait,
 		AutoPressEnterOnTrustPrompt: true,
 	})

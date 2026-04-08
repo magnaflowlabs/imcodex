@@ -1,19 +1,22 @@
 FROM node:20-bookworm-slim
 
 ARG CODEX_VERSION=0.118.0
+ARG IMCODEX_IMAGE_REVISION=dev
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
+    && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates git gosu ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @openai/codex@${CODEX_VERSION}
 
-RUN useradd -m -u 1000 agent
-USER agent
+RUN useradd --create-home --shell /bin/bash agent
 WORKDIR /workspace
+
+LABEL com.magnaflowlabs.imcodex.codex-version="${CODEX_VERSION}"
+LABEL com.magnaflowlabs.imcodex.image-revision="${IMCODEX_IMAGE_REVISION}"
 
 ENV HOME=/home/agent
 ENV CODEX_HOME=/home/agent/.codex
 ENV IMCODEX_CODEX_VERSION=${CODEX_VERSION}
 
-CMD ["codex", "--no-alt-screen", "-C", "/workspace"]
+CMD ["bash", "-lc", "exec gosu agent codex -a never -s danger-full-access --no-alt-screen -C /workspace"]

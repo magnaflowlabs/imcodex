@@ -101,14 +101,55 @@ groups:
 	}
 }
 
-func TestParseConfigReadsGlobalSessionCommandAndSessionNames(t *testing.T) {
+func TestParseConfigExpandsHomeAndEnvInPaths(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
+		"HOME":               "/home/demo",
+		"PROJECT_ROOT":       "/srv/demo",
+		"LARK_APP_ID":        "cli_env",
+		"LARK_APP_SECRET":    "secret_env",
+		"TELEGRAM_BOT_TOKEN": "unused",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: ~/workspace/project
+    jobs:
+      - name: hourly_review
+        schedule: "1 * * * *"
+        prompt_file: ${HOME}/prompts/hourly_review.md
+      - name: hl_stack_cycle
+        schedule: "2 * * * *"
+        command: ./ops/run_dry_cycle.sh
+        artifacts_dir: $PROJECT_ROOT/.imcodex/jobs/hl_stack_cycle
+        summary_file: ~/.imcodex/jobs/hl_stack_cycle/latest-summary.md
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	group := cfg.groups[0]
+	if got, want := group.CWD, "/home/demo/workspace/project"; got != want {
+		t.Fatalf("cwd = %q, want %q", got, want)
+	}
+	if got, want := group.Jobs[0].PromptFile, "/home/demo/prompts/hourly_review.md"; got != want {
+		t.Fatalf("prompt_file = %q, want %q", got, want)
+	}
+	if got, want := group.Jobs[1].ArtifactsDir, "/srv/demo/.imcodex/jobs/hl_stack_cycle"; got != want {
+		t.Fatalf("artifacts_dir = %q, want %q", got, want)
+	}
+	if got, want := group.Jobs[1].SummaryFile, "/home/demo/.imcodex/jobs/hl_stack_cycle/latest-summary.md"; got != want {
+		t.Fatalf("summary_file = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigReadsSessionNames(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
 		"LARK_APP_ID":     "cli_env",
 		"LARK_APP_SECRET": "secret_env",
 	}), readConfig(`
-session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex
 groups:
   - group_id: oc_1
     cwd: /srv/demo
@@ -123,9 +164,6 @@ groups:
 		t.Fatalf("parseConfig() error = %v", err)
 	}
 
-	if got, want := cfg.sessionCommand, "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex"; got != want {
-		t.Fatalf("config session_command = %q, want %q", got, want)
-	}
 	group := cfg.groups[0]
 	if got, want := group.SessionName, "main-demo"; got != want {
 		t.Fatalf("group session_name = %q, want %q", got, want)
@@ -136,14 +174,13 @@ groups:
 	}
 }
 
-func TestParseConfigDerivesDockerCodexSessionCommandFromRuntime(t *testing.T) {
+func TestParseConfigDefaultsToDockerCodexRuntime(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
 		"LARK_APP_ID":     "cli_env",
 		"LARK_APP_SECRET": "secret_env",
 	}), readConfig(`
-runtime: docker-codex
 groups:
   - group_id: oc_1
     cwd: /srv/demo
@@ -155,62 +192,12 @@ groups:
 	if got, want := cfg.runtime, "docker-codex"; got != want {
 		t.Fatalf("runtime = %q, want %q", got, want)
 	}
-	if got, want := cfg.sessionCommand, "imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex"; got != want {
-		t.Fatalf("sessionCommand = %q, want %q", got, want)
-	}
 }
 
-func TestParseConfigDerivesDockerClaudeSessionCommandWithConfigDir(t *testing.T) {
+func TestParseConfigReadsHostRuntimeFlag(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
-		"LARK_APP_ID":     "cli_env",
-		"LARK_APP_SECRET": "secret_env",
-	}), readConfig(`
-runtime: docker-claude
-runtime_config_dir: ./runtime/claude-config
-groups:
-  - group_id: oc_1
-    cwd: /srv/demo
-`))
-	if err != nil {
-		t.Fatalf("parseConfig() error = %v", err)
-	}
-
-	if got, want := cfg.runtimeConfigDir, "/srv/imcodex/runtime/claude-config"; got != want {
-		t.Fatalf("runtimeConfigDir = %q, want %q", got, want)
-	}
-	if got, want := cfg.sessionCommand, "imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude --config-dir '/srv/imcodex/runtime/claude-config'"; got != want {
-		t.Fatalf("sessionCommand = %q, want %q", got, want)
-	}
-}
-
-func TestParseConfigSessionCommandOverridesRuntimeShortcut(t *testing.T) {
-	t.Parallel()
-
-	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
-		"LARK_APP_ID":     "cli_env",
-		"LARK_APP_SECRET": "secret_env",
-	}), readConfig(`
-runtime: docker-codex
-session_command: /usr/local/bin/custom-wrapper --workspace '{cwd}'
-groups:
-  - group_id: oc_1
-    cwd: /srv/demo
-`))
-	if err != nil {
-		t.Fatalf("parseConfig() error = %v", err)
-	}
-
-	if got, want := cfg.sessionCommand, "/usr/local/bin/custom-wrapper --workspace '{cwd}'"; got != want {
-		t.Fatalf("sessionCommand = %q, want %q", got, want)
-	}
-}
-
-func TestParseConfigKeepsLegacyModeWhenSessionCommandIsOmitted(t *testing.T) {
-	t.Parallel()
-
-	cfg, err := parseConfig(nil, envLookup(map[string]string{
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml", "--runtime", "host-codex"}, envLookup(map[string]string{
 		"LARK_APP_ID":     "cli_env",
 		"LARK_APP_SECRET": "secret_env",
 	}), readConfig(`
@@ -221,19 +208,90 @@ groups:
 	if err != nil {
 		t.Fatalf("parseConfig() error = %v", err)
 	}
-	if cfg.sessionCommand != "" {
-		t.Fatalf("sessionCommand = %q, want empty legacy default", cfg.sessionCommand)
+	if got, want := cfg.runtime, "host-codex"; got != want {
+		t.Fatalf("runtime = %q, want %q", got, want)
 	}
 }
 
-func TestParseConfigRejectsUnsupportedRuntime(t *testing.T) {
+func TestParseConfigReadsCodexConfigDirFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml", "--codex-config-dir", "~/runtime/codex"}, envLookup(map[string]string{
+		"HOME":            "/home/demo",
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	if got, want := cfg.codexConfigDir, "/home/demo/runtime/codex"; got != want {
+		t.Fatalf("codexConfigDir = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigRejectsRemovedRuntimeField(t *testing.T) {
 	t.Parallel()
 
 	_, err := parseConfig(nil, envLookup(map[string]string{
 		"LARK_APP_ID":     "cli_env",
 		"LARK_APP_SECRET": "secret_env",
 	}), readConfig(`
-runtime: sandbox-codex
+runtime: host-codex
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err == nil || !strings.Contains(err.Error(), "config field runtime was removed") {
+		t.Fatalf("parseConfig() error = %v, want removed-runtime error", err)
+	}
+}
+
+func TestParseConfigRejectsRemovedRuntimeConfigDirField(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+runtime_config_dir: ~/.codex
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err == nil || !strings.Contains(err.Error(), "config field runtime_config_dir was removed") {
+		t.Fatalf("parseConfig() error = %v, want removed-runtime-config-dir error", err)
+	}
+}
+
+func TestParseConfigRejectsRemovedSessionCommandField(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}'
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err == nil || !strings.Contains(err.Error(), "config field session_command was removed") {
+		t.Fatalf("parseConfig() error = %v, want removed-session-command error", err)
+	}
+}
+
+func TestParseConfigRejectsUnsupportedRuntimeFlag(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig([]string{"--runtime", "sandbox-codex"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
 groups:
   - group_id: oc_1
     cwd: /srv/demo

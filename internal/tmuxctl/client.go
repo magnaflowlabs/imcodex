@@ -13,6 +13,8 @@ const (
 	controlPaneOption = "@imcodex-control-pane"
 	controlPaneRole   = "@imcodex-pane-role"
 	controlWindowName = "imcodex"
+	readyPollEvery    = 250 * time.Millisecond
+	dockerReadyWait   = 2 * time.Minute
 )
 
 type SessionSpec struct {
@@ -73,6 +75,17 @@ func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, err
 		return false, fmt.Errorf("tmux session %s exited immediately; check cwd and codex startup", spec.SessionName)
 	}
 
+	if strings.TrimSpace(spec.LaunchCommand) != "" {
+		timeout := wait
+		if timeout < dockerReadyWait {
+			timeout = dockerReadyWait
+		}
+		if err := c.waitForPrompt(ctx, spec, timeout); err != nil {
+			return false, err
+		}
+		return created, nil
+	}
+
 	if spec.AutoPressEnterOnTrustPrompt {
 		snapshot, err := c.Capture(ctx, spec.SessionName, 80)
 		if err == nil && IsTrustPrompt(snapshot) {
@@ -84,6 +97,40 @@ func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, err
 	}
 
 	return created, nil
+}
+
+func (c *Client) waitForPrompt(ctx context.Context, spec SessionSpec, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	lastTrustEnter := time.Time{}
+	for {
+		if ok, err := c.hasSession(ctx, spec.SessionName); err != nil {
+			return err
+		} else if !ok {
+			return fmt.Errorf("tmux session %s exited before Codex became ready", spec.SessionName)
+		}
+
+		snapshot, err := c.Capture(ctx, spec.SessionName, 120)
+		if err == nil {
+			if spec.AutoPressEnterOnTrustPrompt && IsTrustPrompt(snapshot) && time.Since(lastTrustEnter) >= time.Second {
+				if err := c.sendKey(ctx, spec.SessionName, "Enter"); err != nil {
+					return err
+				}
+				lastTrustEnter = time.Now()
+			}
+			if _, hasPrompt := InputStatusSlot(snapshot); hasPrompt {
+				return nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("tmux session %s did not become ready within %s", spec.SessionName, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(readyPollEvery):
+		}
+	}
 }
 
 func (c *Client) SendText(ctx context.Context, session string, text string) error {

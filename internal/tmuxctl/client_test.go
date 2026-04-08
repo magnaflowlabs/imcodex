@@ -128,13 +128,13 @@ func TestDefaultLaunchCommandUsesNeverApprovalAndDangerFullAccess(t *testing.T) 
 func TestExpandLaunchCommandTemplate(t *testing.T) {
 	t.Parallel()
 
-	got := expandLaunchCommandTemplate("/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --group '{group_id}' --job '{job_name}'", SessionSpec{
+	got := expandLaunchCommandTemplate("exec '/srv/imcodex/imcodex' 'internal-run-docker-codex' '--workspace' '{cwd}' '--session' '{session_name}' '--group' '{group_id}' '--job' '{job_name}'", SessionSpec{
 		SessionName: "demo-session",
 		CWD:         "/srv/demo",
 		GroupID:     "oc_1",
 		JobName:     "hourly_review",
 	})
-	want := "/usr/local/bin/imcodex-agent-run --workspace '/srv/demo' --session 'demo-session' --group 'oc_1' --job 'hourly_review'"
+	want := "exec '/srv/imcodex/imcodex' 'internal-run-docker-codex' '--workspace' '/srv/demo' '--session' 'demo-session' '--group' 'oc_1' '--job' 'hourly_review'"
 	if got != want {
 		t.Fatalf("expandLaunchCommandTemplate() = %q, want %q", got, want)
 	}

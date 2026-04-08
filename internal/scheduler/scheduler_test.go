@@ -186,13 +186,13 @@ func TestJobRunnerPromptSessionPassesLaunchOverride(t *testing.T) {
 	console := &fakeConsole{captures: []string{"", "", ""}}
 	job := &jobRunner{
 		job: Job{
-			GroupID:        "oc_1",
-			CWD:            t.TempDir(),
-			Name:           "claude_review",
-			Schedule:       "1 * * * *",
-			PromptFile:     promptFile,
-			SessionName:    "imcodex-job-claude-review",
-			SessionCommand: "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude",
+			GroupID:       "oc_1",
+			CWD:           t.TempDir(),
+			Name:          "claude_review",
+			Schedule:      "1 * * * *",
+			PromptFile:    promptFile,
+			SessionName:   "imcodex-job-claude-review",
+			LaunchCommand: "exec '/srv/imcodex/imcodex' 'internal-run-docker-codex' '--workspace' '{cwd}' '--session' '{session_name}'",
 		},
 		messenger: &fakeMessenger{},
 		console:   console,
@@ -210,7 +210,7 @@ func TestJobRunnerPromptSessionPassesLaunchOverride(t *testing.T) {
 	if len(specs) != 1 {
 		t.Fatalf("len(ensure) = %d, want 1", len(specs))
 	}
-	if got, want := specs[0].LaunchCommand, "/usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude"; got != want {
+	if got, want := specs[0].LaunchCommand, "exec '/srv/imcodex/imcodex' 'internal-run-docker-codex' '--workspace' '{cwd}' '--session' '{session_name}'"; got != want {
 		t.Fatalf("LaunchCommand = %q, want %q", got, want)
 	}
 	if got, want := specs[0].JobName, "claude_review"; got != want {

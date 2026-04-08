@@ -1,17 +1,15 @@
+# Runtime is selected at startup, not in YAML.
+# Default:
+#   ./imcodex -config /srv/imcodex/imcodex.yaml
+# Explicit Docker runtime:
+#   ./imcodex -config /srv/imcodex/imcodex.yaml --runtime docker-codex
+# Explicit host runtime:
+#   ./imcodex -config /srv/imcodex/imcodex.yaml --runtime host-codex
+# Optional Docker Codex config dir override:
+#   ./imcodex -config /srv/imcodex/imcodex.yaml --codex-config-dir ~/.codex
+
 # Platform defaults to lark when omitted.
 platform: lark
-
-# Runtime defaults to host-codex when omitted.
-# Supported values:
-#   host-codex
-#   docker-codex
-#   docker-claude
-# runtime: host-codex
-
-# Optional read-only agent config seed used by docker-* runtime shortcuts.
-# The wrapper copies this directory into the container-local agent home before
-# starting the CLI.
-# runtime_config_dir: ~/.codex
 
 # Lark / Feishu
 # Use https://open.feishu.cn for Feishu China tenants.
@@ -20,12 +18,9 @@ lark_app_secret: your_app_secret
 lark_base_url: https://open.larksuite.com
 
 # Telegram
+# platform: telegram
 # telegram_bot_token: 123456:ABCDEF
 # telegram_base_url: https://api.telegram.org
-
-# Optional low-level escape hatch.
-# If set, this overrides the higher-level runtime shortcut above.
-# session_command: /usr/local/bin/imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex --config-dir '/home/ubuntu/.codex'
 
 interrupt_on_new_message: true
 
@@ -52,4 +47,4 @@ groups:
           printf 'hl_stack dry cycle completed.\nartifacts: %s\n' "$IMCODEX_JOB_ARTIFACTS_DIR" > "$IMCODEX_JOB_SUMMARY_FILE"
 
   - group_id: oc_xxx_secondary
-    cwd: /srv/another-project
+    cwd: ~/another-project

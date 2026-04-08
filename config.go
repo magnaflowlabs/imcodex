@@ -15,15 +15,13 @@ import (
 )
 
 const (
-	defaultConfigPath         = "imcodex.yaml"
-	defaultUserConfigName     = ".imcodex.yaml"
-	defaultPlatform           = "lark"
-	defaultTelegramAPIURL     = "https://api.telegram.org"
-	defaultRuntime            = "host-codex"
-	runtimeDockerCodex        = "docker-codex"
-	runtimeDockerClaude       = "docker-claude"
-	defaultDockerCodexLaunch  = "imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent codex"
-	defaultDockerClaudeLaunch = "imcodex-agent-run --workspace '{cwd}' --session '{session_name}' --agent claude"
+	defaultConfigPath     = "imcodex.yaml"
+	defaultUserConfigName = ".imcodex.yaml"
+	defaultPlatform       = "lark"
+	defaultTelegramAPIURL = "https://api.telegram.org"
+	defaultRuntime        = runtimeDockerCodex
+	runtimeHostCodex      = "host-codex"
+	runtimeDockerCodex    = "docker-codex"
 )
 
 type config struct {
@@ -35,8 +33,7 @@ type config struct {
 	larkBaseURL           string
 	telegramBotToken      string
 	telegramBaseURL       string
-	runtimeConfigDir      string
-	sessionCommand        string
+	codexConfigDir        string
 	interruptOnNewMessage bool
 	groups                []groupConfig
 }
@@ -60,12 +57,12 @@ type jobConfig struct {
 
 type fileConfig struct {
 	Platform              string        `yaml:"platform"`
-	Runtime               string        `yaml:"runtime"`
 	LarkAppID             string        `yaml:"lark_app_id"`
 	LarkAppSecret         string        `yaml:"lark_app_secret"`
 	LarkBaseURL           string        `yaml:"lark_base_url"`
 	TelegramBotToken      string        `yaml:"telegram_bot_token"`
 	TelegramBaseURL       string        `yaml:"telegram_base_url"`
+	Runtime               string        `yaml:"runtime"`
 	RuntimeConfigDir      string        `yaml:"runtime_config_dir"`
 	SessionCommand        string        `yaml:"session_command"`
 	InterruptOnNewMessage *bool         `yaml:"interrupt_on_new_message"`
@@ -77,7 +74,11 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 	fs.SetOutput(io.Discard)
 
 	var path string
+	var runtime string
+	var codexConfigDir string
 	fs.StringVar(&path, "config", "", "Config file path")
+	fs.StringVar(&runtime, "runtime", defaultRuntime, "Runtime mode: docker-codex or host-codex")
+	fs.StringVar(&codexConfigDir, "codex-config-dir", "", "Codex config directory override for docker-codex")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -85,7 +86,10 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 	if readFile == nil {
 		readFile = os.ReadFile
 	}
-	path = strings.TrimSpace(path)
+	path, err := resolveCLIPath(path, lookupEnv)
+	if err != nil {
+		return config{}, err
+	}
 	path, data, err := loadConfigFile(path, lookupEnv, readFile)
 	if err != nil {
 		return config{}, err
@@ -97,12 +101,14 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 	if err := dec.Decode(&file); err != nil {
 		return config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
-	runtime, err := normalizeRuntime(file.Runtime)
+	if err := rejectDeprecatedRuntimeFields(file); err != nil {
+		return config{}, err
+	}
+	runtime, err = normalizeRuntime(runtime)
 	if err != nil {
 		return config{}, err
 	}
-	runtimeConfigDir := resolveConfigRelativePath(path, file.RuntimeConfigDir)
-	sessionCommand, err := resolveSessionCommand(runtime, runtimeConfigDir, file.SessionCommand)
+	codexConfigDir, err = resolveCLIPath(codexConfigDir, lookupEnv)
 	if err != nil {
 		return config{}, err
 	}
@@ -116,10 +122,9 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 		larkBaseURL:           firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
 		telegramBotToken:      firstNonEmpty(file.TelegramBotToken, envValue(lookupEnv, "TELEGRAM_BOT_TOKEN")),
 		telegramBaseURL:       firstNonEmpty(file.TelegramBaseURL, envValue(lookupEnv, "TELEGRAM_BASE_URL"), defaultTelegramAPIURL),
-		runtimeConfigDir:      runtimeConfigDir,
-		sessionCommand:        sessionCommand,
+		codexConfigDir:        codexConfigDir,
 		interruptOnNewMessage: boolValue(file.InterruptOnNewMessage, true),
-		groups:                normalizeGroups(file.Groups, path),
+		groups:                normalizeGroups(file.Groups, path, lookupEnv),
 	}
 	if err := cfg.validate(); err != nil {
 		return config{}, err
@@ -157,19 +162,19 @@ func loadConfigFile(path string, lookupEnv func(string) (string, bool), readFile
 	return "", nil, fmt.Errorf("config not found; tried %s", strings.Join(missing, ", "))
 }
 
-func normalizeGroups(groups []groupConfig, configPath string) []groupConfig {
+func normalizeGroups(groups []groupConfig, configPath string, lookupEnv func(string) (string, bool)) []groupConfig {
 	out := make([]groupConfig, 0, len(groups))
 	for _, group := range groups {
-		cwd := strings.TrimSpace(group.CWD)
+		cwd := expandPathValue(group.CWD, lookupEnv)
 		jobs := make([]jobConfig, 0, len(group.Jobs))
 		for _, job := range group.Jobs {
 			jobs = append(jobs, jobConfig{
 				Name:         strings.TrimSpace(job.Name),
 				Schedule:     strings.TrimSpace(job.Schedule),
-				PromptFile:   resolveConfigRelativePath(configPath, job.PromptFile),
+				PromptFile:   resolveConfigRelativePath(configPath, job.PromptFile, lookupEnv),
 				Command:      strings.TrimSpace(job.Command),
-				ArtifactsDir: resolveWorkingDirRelativePath(cwd, job.ArtifactsDir),
-				SummaryFile:  resolveWorkingDirRelativePath(cwd, job.SummaryFile),
+				ArtifactsDir: resolveWorkingDirRelativePath(cwd, job.ArtifactsDir, lookupEnv),
+				SummaryFile:  resolveWorkingDirRelativePath(cwd, job.SummaryFile, lookupEnv),
 				SessionName:  strings.TrimSpace(job.SessionName),
 			})
 		}
@@ -287,36 +292,11 @@ func normalizeRuntime(value string) (string, error) {
 		return defaultRuntime, nil
 	}
 	switch value {
-	case defaultRuntime, runtimeDockerCodex, runtimeDockerClaude:
+	case runtimeHostCodex, runtimeDockerCodex:
 		return value, nil
 	default:
 		return "", fmt.Errorf("unsupported runtime: %s", value)
 	}
-}
-
-func resolveSessionCommand(runtime string, runtimeConfigDir string, sessionCommand string) (string, error) {
-	sessionCommand = strings.TrimSpace(sessionCommand)
-	if sessionCommand != "" {
-		return sessionCommand, nil
-	}
-	switch runtime {
-	case "", defaultRuntime:
-		return "", nil
-	case runtimeDockerCodex:
-		return appendRuntimeConfigDir(defaultDockerCodexLaunch, runtimeConfigDir), nil
-	case runtimeDockerClaude:
-		return appendRuntimeConfigDir(defaultDockerClaudeLaunch, runtimeConfigDir), nil
-	default:
-		return "", fmt.Errorf("unsupported runtime: %s", runtime)
-	}
-}
-
-func appendRuntimeConfigDir(command string, runtimeConfigDir string) string {
-	runtimeConfigDir = strings.TrimSpace(runtimeConfigDir)
-	if runtimeConfigDir == "" {
-		return command
-	}
-	return command + " --config-dir " + shellQuote(runtimeConfigDir)
 }
 
 func shellQuote(value string) string {
@@ -327,8 +307,55 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
-func resolveConfigRelativePath(configPath string, value string) string {
+func resolveCLIPath(value string, lookupEnv func(string) (string, bool)) (string, error) {
+	value = expandPathValue(value, lookupEnv)
+	if value == "" {
+		return "", nil
+	}
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value), nil
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve path %s: %w", value, err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+func rejectDeprecatedRuntimeFields(file fileConfig) error {
+	switch {
+	case strings.TrimSpace(file.Runtime) != "":
+		return errors.New("config field runtime was removed in v2.2; use --runtime docker-codex or --runtime host-codex")
+	case strings.TrimSpace(file.RuntimeConfigDir) != "":
+		return errors.New("config field runtime_config_dir was removed in v2.2; use --codex-config-dir instead")
+	case strings.TrimSpace(file.SessionCommand) != "":
+		return errors.New("config field session_command was removed in v2.2; imcodex now manages launch commands internally")
+	default:
+		return nil
+	}
+}
+
+func expandPathValue(value string, lookupEnv func(string) (string, bool)) string {
 	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if home := firstNonEmpty(envValue(lookupEnv, "HOME"), envValue(lookupEnv, "USERPROFILE")); home != "" {
+		switch {
+		case value == "~":
+			value = home
+		case strings.HasPrefix(value, "~/"), strings.HasPrefix(value, "~\\"):
+			value = filepath.Join(home, value[2:])
+		}
+	}
+	value = os.Expand(value, func(key string) string {
+		return envValue(lookupEnv, key)
+	})
+	return strings.TrimSpace(value)
+}
+
+func resolveConfigRelativePath(configPath string, value string, lookupEnv func(string) (string, bool)) string {
+	value = expandPathValue(value, lookupEnv)
 	if value == "" || filepath.IsAbs(value) {
 		return value
 	}
@@ -340,8 +367,8 @@ func resolveConfigRelativePath(configPath string, value string) string {
 	return filepath.Clean(filepath.Join(configDir, value))
 }
 
-func resolveWorkingDirRelativePath(cwd string, value string) string {
-	value = strings.TrimSpace(value)
+func resolveWorkingDirRelativePath(cwd string, value string, lookupEnv func(string) (string, bool)) string {
+	value = expandPathValue(value, lookupEnv)
 	if value == "" || filepath.IsAbs(value) || strings.TrimSpace(cwd) == "" {
 		return value
 	}
