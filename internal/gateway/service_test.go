@@ -47,14 +47,17 @@ func (f *fakeMessenger) all() []string {
 }
 
 type fakeEditableMessenger struct {
-	mu       sync.Mutex
-	nextID   int
-	messages []trackedMessage
-	events   []string
-	sendErrs []error
-	editErrs []error
-	delErrs  []error
-	edits    int
+	mu         sync.Mutex
+	nextID     int
+	messages   []trackedMessage
+	events     []string
+	sendErrs   []error
+	editErrs   []error
+	delErrs    []error
+	actionErrs []error
+	edits      int
+	sends      int
+	actions    int
 }
 
 func (f *fakeEditableMessenger) SendTextToChat(ctx context.Context, groupID string, text string) error {
@@ -65,6 +68,7 @@ func (f *fakeEditableMessenger) SendTextToChat(ctx context.Context, groupID stri
 func (f *fakeEditableMessenger) SendTextToChatWithID(_ context.Context, _ string, text string) (SentMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sends++
 	if len(f.sendErrs) > 0 {
 		err := f.sendErrs[0]
 		if len(f.sendErrs) > 1 {
@@ -150,11 +154,33 @@ func (f *fakeEditableMessenger) editCount() int {
 	return f.edits
 }
 
+func (f *fakeEditableMessenger) sendCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sends
+}
+
 func (f *fakeEditableMessenger) SendChatAction(_ context.Context, groupID string, action string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.actions++
+	if len(f.actionErrs) > 0 {
+		err := f.actionErrs[0]
+		if len(f.actionErrs) > 1 {
+			f.actionErrs = f.actionErrs[1:]
+		}
+		if err != nil {
+			return err
+		}
+	}
 	f.events = append(f.events, "action:"+groupID+":"+action)
 	return nil
+}
+
+func (f *fakeEditableMessenger) actionCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.actions
 }
 
 type fakeConsole struct {
@@ -1580,6 +1606,193 @@ func TestServiceDetachedRateLimitBlocksEditableFlushViaSharedOutputBackoff(t *te
 	}
 }
 
+func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeMessenger{
+		sendErrs: []error{
+			nil,
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 1 retry_after=1"),
+			nil,
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            6,
+		nextRunID:        6,
+		forcePlainOutput: true,
+		outputBuffer:     strings.Repeat("x", maxMessageRunes+16),
+		outputBufferedAt: time.Now(),
+	}
+
+	svc.flushOutputBuffer(rt)
+
+	firstPass := messenger.all()
+	if got, want := len(firstPass), 1; got != want {
+		t.Fatalf("len(messages) after first plain pass = %d, want %d", got, want)
+	}
+	if got, want := len(rt.detachedOutputs), 1; got != want {
+		t.Fatalf("len(detachedOutputs) after plain 429 = %d, want %d", got, want)
+	}
+	if rt.outputBackoffUntil.IsZero() {
+		t.Fatal("outputBackoffUntil = zero, want shared backoff after plain 429")
+	}
+
+	svc.flushDetachedOutputs(rt)
+	if got, want := len(messenger.all()), 1; got != want {
+		t.Fatalf("len(messages) during shared backoff = %d, want %d", got, want)
+	}
+
+	rt.outputBackoffUntil = time.Time{}
+	rt.detachedBackoffUntil = time.Time{}
+	svc.flushDetachedOutputs(rt)
+
+	final := messenger.all()
+	if got, want := len(final), 2; got != want {
+		t.Fatalf("len(messages) after detached retry = %d, want %d", got, want)
+	}
+	if got := final[0] + final[1]; got != strings.Repeat("x", maxMessageRunes+16) {
+		t.Fatalf("reassembled plain fallback output = %q, want exact original text", got)
+	}
+}
+
+func TestServiceWorkingStatusRateLimitDoesNotFallbackOrRetryImmediately(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{
+		sendErrs: []error{
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 2 retry_after=2"),
+			nil,
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{opts: svc.opts}
+
+	if ok := svc.sendWorkingStatus(rt); ok {
+		t.Fatal("sendWorkingStatus() = true, want rate-limited failure")
+	}
+	if got := messenger.sendCount(); got != 1 {
+		t.Fatalf("sendCount = %d, want 1 failed attempt without fallback", got)
+	}
+	if rt.outputBackoffUntil.IsZero() {
+		t.Fatal("outputBackoffUntil = zero, want shared backoff after working status 429")
+	}
+
+	if ok := svc.sendWorkingStatus(rt); ok {
+		t.Fatal("sendWorkingStatus() during backoff = true, want suppressed")
+	}
+	if got := messenger.sendCount(); got != 1 {
+		t.Fatalf("sendCount during backoff = %d, want still 1", got)
+	}
+}
+
+func TestServiceChatActionRateLimitSharesBackoff(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{
+		actionErrs: []error{
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 2 retry_after=2"),
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{opts: svc.opts}
+
+	svc.sendChatAction(rt)
+	if got := messenger.actionCount(); got != 1 {
+		t.Fatalf("actionCount = %d, want 1 failed attempt", got)
+	}
+	if rt.outputBackoffUntil.IsZero() {
+		t.Fatal("outputBackoffUntil = zero, want shared backoff after chat action 429")
+	}
+
+	svc.sendChatAction(rt)
+	if got := messenger.actionCount(); got != 1 {
+		t.Fatalf("actionCount during backoff = %d, want still 1", got)
+	}
+}
+
+func TestServiceRetainsWorkingStatusWhenCleanupRateLimited(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{
+		messages: []trackedMessage{
+			{messageID: "1", text: workingStatusText},
+		},
+		delErrs: []error{
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 1 retry_after=1"),
+			nil,
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:          svc.opts,
+		statusMessage: trackedMessage{messageID: "1", text: workingStatusText},
+	}
+
+	svc.clearWorkingStatus(rt)
+	if got := rt.statusMessage.messageID; got != "1" {
+		t.Fatalf("statusMessage.messageID = %q, want retained while cleanup is rate-limited", got)
+	}
+	if got := messenger.editCount(); got != 0 {
+		t.Fatalf("editCount = %d, want no fallback edit during delete 429", got)
+	}
+
+	rt.outputBackoffUntil = time.Time{}
+	rt.workingBackoffUntil = time.Time{}
+	svc.clearWorkingStatus(rt)
+	if got := rt.statusMessage.messageID; got != "" {
+		t.Fatalf("statusMessage.messageID = %q, want cleared after retry succeeds", got)
+	}
+}
+
+func TestServiceRetainsStaleEditableMessagesWhenCleanupRateLimited(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{
+		messages: []trackedMessage{
+			{messageID: "1", text: "seg-1"},
+			{messageID: "2", text: "seg-2"},
+		},
+		delErrs: []error{
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 1 retry_after=1"),
+			nil,
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:      svc.opts,
+		runID:     7,
+		nextRunID: 7,
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "seg-1"},
+			{messageID: "2", text: "seg-2"},
+		},
+	}
+
+	if err := svc.syncEditableOutput(rt, messenger, "seg-1", false); err != nil {
+		t.Fatalf("syncEditableOutput(rate-limited prune) error = %v", err)
+	}
+	if got, want := len(rt.outputMessages), 2; got != want {
+		t.Fatalf("len(outputMessages) after rate-limited prune = %d, want %d", got, want)
+	}
+	if rt.outputBackoffUntil.IsZero() {
+		t.Fatal("outputBackoffUntil = zero, want shared backoff after stale cleanup 429")
+	}
+
+	rt.outputBackoffUntil = time.Time{}
+	rt.workingBackoffUntil = time.Time{}
+	if err := svc.syncEditableOutput(rt, messenger, "seg-1", false); err != nil {
+		t.Fatalf("syncEditableOutput(retry prune) error = %v", err)
+	}
+	if got, want := len(rt.outputMessages), 1; got != want {
+		t.Fatalf("len(outputMessages) after retry prune = %d, want %d", got, want)
+	}
+	if events := strings.Join(messenger.allEvents(), "\n"); !strings.Contains(events, "delete:2") {
+		t.Fatalf("events = %#v, want stale segment deleted on retry", messenger.allEvents())
+	}
+}
+
 func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 	t.Parallel()
 
@@ -1873,10 +2086,15 @@ func TestServiceEditableMessengerVeryLongReplyNoLoss(t *testing.T) {
 		t.Fatalf("HandleMessage() error = %v", err)
 	}
 
-	waitFor(t, 800*time.Millisecond, func() bool {
+	deadline := time.Now().Add(800 * time.Millisecond)
+	for time.Now().Before(deadline) {
 		joined := strings.Join(nonStatusMessages(messenger.all()), "")
-		return joined == final
-	})
+		if joined == final {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for final editable body:\nmessages=%#v", messenger.all())
 }
 
 func TestServiceDetachedOutputKeepsQueueOnRepeatedNonRateLimitErrors(t *testing.T) {
