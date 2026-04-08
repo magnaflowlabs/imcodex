@@ -18,20 +18,21 @@ import (
 )
 
 const (
-	maxMessageRunes          = 3000
-	queueSize                = 64
-	recentMessageIDLimit     = 256
-	defaultFlushIdleTicks    = 24
-	defaultIdleConfirmTicks  = 3
-	defaultWorkingAfter      = time.Second
-	defaultChatActionEvery   = 4 * time.Second
-	defaultBusyFlushAfter    = 5 * time.Second
-	defaultOutputWatchdog    = 8 * time.Second
-	defaultDetachedWatchdog  = 15 * time.Second
-	defaultEditRolloverAt    = 2800
-	defaultEditableSyncEvery = 5 * time.Second
-	defaultSilentBusyGrace   = 20 * time.Minute
-	workingStatusText        = "[working] Codex is processing."
+	maxMessageRunes            = 3000
+	queueSize                  = 64
+	recentMessageIDLimit       = 256
+	defaultFlushIdleTicks      = 24
+	defaultIdleConfirmTicks    = 3
+	defaultWorkingAfter        = time.Second
+	defaultChatActionEvery     = 4 * time.Second
+	defaultBusyFlushAfter      = 5 * time.Second
+	defaultOutputWatchdog      = 8 * time.Second
+	defaultDetachedWatchdog    = 15 * time.Second
+	defaultWatchdogDetachAfter = 30 * time.Second
+	defaultEditRolloverAt      = 2800
+	defaultEditableSyncEvery   = 5 * time.Second
+	defaultSilentBusyGrace     = 20 * time.Minute
+	workingStatusText          = "[working] Codex is processing."
 )
 
 type IncomingMessage struct {
@@ -111,6 +112,7 @@ type Service struct {
 	busyFlushAfter        time.Duration
 	outputWatchdogAfter   time.Duration
 	detachedWatchdogAfter time.Duration
+	watchdogDetachAfter   time.Duration
 	editRolloverAt        int
 	editableSyncEvery     time.Duration
 	silentBusyGrace       time.Duration
@@ -203,6 +205,7 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		busyFlushAfter:        defaultBusyFlushAfter,
 		outputWatchdogAfter:   defaultOutputWatchdog,
 		detachedWatchdogAfter: defaultDetachedWatchdog,
+		watchdogDetachAfter:   defaultWatchdogDetachAfter,
 		editRolloverAt:        defaultEditRolloverAt,
 		editableSyncEvery:     defaultEditableSyncEvery,
 		silentBusyGrace:       defaultSilentBusyGrace,
@@ -745,10 +748,23 @@ func (s *Service) applyOutputWatchdog(rt *groupRuntime, now time.Time) {
 			(s.shouldDeferBodyFlush(rt, now) ||
 				(!rt.editBackoffUntil.IsZero() && rt.editBackoffUntil.After(now)) ||
 				(!rt.outputBackoffUntil.IsZero() && rt.outputBackoffUntil.After(now))) {
-			// Keep buffered body in editable mode while deferred/backing off.
-			// Detaching here can turn transient rewritten snapshots into
-			// duplicated plain messages.
-			return
+			if !s.shouldForceWatchdogDetach(rt, age, now) {
+				// Keep buffered body in editable mode while deferred/backing off.
+				// Detaching here can turn transient rewritten snapshots into
+				// duplicated plain messages.
+				return
+			}
+			s.logger.Warn(
+				"output watchdog forcing plain fallback",
+				"group_id", rt.opts.GroupID,
+				"run_id", rt.runID,
+				"cursor", rt.runCursor(rt.runID),
+				"age", age.String(),
+				"buffer_len", utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")),
+			)
+			rt.forcePlainOutput = true
+			rt.deferBodyUntilIdle = false
+			rt.editBackoffUntil = time.Time{}
 		}
 		s.detachBufferedOutput(rt)
 	}
@@ -1903,6 +1919,20 @@ func (s *Service) canSyncEditableOutput(rt *groupRuntime, now time.Time, force b
 		return true
 	}
 	return now.Sub(rt.lastEditableSyncAt) >= s.editableSyncEvery
+}
+
+func (s *Service) shouldForceWatchdogDetach(rt *groupRuntime, age time.Duration, now time.Time) bool {
+	if rt == nil {
+		return false
+	}
+	if s.watchdogDetachAfter > 0 && age >= s.watchdogDetachAfter {
+		return true
+	}
+	// Extremely large buffered bodies should not stay stuck in editable mode
+	// even if the run is still active; move them to the detached queue and let
+	// the shared output backoff govern actual delivery.
+	return utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")) >= maxMessageRunes*8 &&
+		now.Sub(rt.outputBufferedAt) >= s.outputWatchdogAfter*2
 }
 
 func (s *Service) clearWorkingStatus(rt *groupRuntime) {

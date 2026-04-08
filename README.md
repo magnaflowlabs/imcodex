@@ -185,7 +185,7 @@ Key properties of this model:
 
 ## Compatibility
 
-`v2.1.0` keeps the old config behavior:
+`v2.1.1` keeps the old config behavior:
 
 - if both `runtime` and `session_command` are omitted, `imcodex` uses the legacy host-side `codex`
   launch path
@@ -364,7 +364,7 @@ If you use `./imcodex.yaml` or `~/.imcodex.yaml`, `-config` is optional:
 Expected startup log:
 
 ```text
-imcodex 2.1.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
+imcodex 2.1.1 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 jobs=1 base=https://open.larksuite.com
 ```
 
 ## Runtime Behavior
@@ -380,7 +380,7 @@ imcodex 2.1.0 started: config=/srv/imcodex/imcodex.yaml platform=lark groups=1 j
 | Telegram forwarding identity | Each Codex run is tracked by `(run_id, cursor)` for ordering and debug telemetry |
 | New prompt while prior tail is blocked on edit/backoff | New prompt dispatch proceeds immediately; unsent prior tail is detached to an internal send queue and delivered asynchronously |
 | Boundary capture safety | Before dispatching a new prompt, if boundary capture still shows busy or capture fails, dispatch is deferred so prior tail output is not dropped |
-| Telegram forwarding watchdog | If buffered output or detached queue head stays pending too long, a watchdog forces drain/retry so forwarding cannot stall silently |
+| Telegram forwarding watchdog | If buffered output or detached queue head stays pending too long, a watchdog forces drain/retry; prolonged editable backoff falls back into the detached plain-send path instead of stalling in memory |
 | Tmux capture/session transient failure | Pending buffered output is retained and retried after reconnect before dispatching the next prompt |
 | Silent long-think protection | If a run is still in flight but tmux temporarily shows no visible body, `imcodex` keeps the run busy for a grace window instead of prematurely declaring completion |
 | Busy detection | Busy state is derived from the agent working chrome near the prompt, reducing false idle transitions when the pane footer layout shifts |

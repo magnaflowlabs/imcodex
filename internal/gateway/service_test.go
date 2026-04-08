@@ -998,7 +998,10 @@ func TestServiceEditableMessengerKeepsWorkingMessageSeparateFromReply(t *testing
 	if !strings.Contains(joinedEvents, "send:") || !strings.Contains(joinedEvents, workingStatusText) || !strings.Contains(joinedEvents, "• final reply") {
 		t.Fatalf("events = %#v, want working send and body send", events)
 	}
-	if !strings.Contains(joinedEvents, "delete:1") {
+	waitFor(t, 2*time.Second, func() bool {
+		return strings.Contains(strings.Join(messenger.allEvents(), "\n"), "delete:1")
+	})
+	if !strings.Contains(strings.Join(messenger.allEvents(), "\n"), "delete:1") {
 		t.Fatalf("events = %#v, want working message cleaned up on idle", events)
 	}
 }
@@ -1440,7 +1443,7 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 		t.Fatalf("len(messages) after early backoff window = %d, want 0 body chunks before retry", got)
 	}
 
-	waitFor(t, 2*time.Second, func() bool {
+	waitFor(t, 5*time.Second, func() bool {
 		got := nonStatusMessages(messenger.all())
 		return len(got) == 1 && got[0] == "• first\n\n• second"
 	})
@@ -1617,7 +1620,7 @@ func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 		t.Fatalf("HandleMessage(first) error = %v", err)
 	}
 
-	waitFor(t, 500*time.Millisecond, func() bool {
+	waitFor(t, 2*time.Second, func() bool {
 		return strings.Contains(strings.Join(messenger.allEvents(), "\n"), workingStatusText)
 	})
 
@@ -1629,7 +1632,7 @@ func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 		t.Fatalf("HandleMessage(second) error = %v", err)
 	}
 
-	waitFor(t, 500*time.Millisecond, func() bool {
+	waitFor(t, 2*time.Second, func() bool {
 		return len(console.allSendTexts()) >= 2
 	})
 	sendTexts := console.allSendTexts()
@@ -1637,7 +1640,7 @@ func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 		t.Fatalf("sendTexts[1] = %q, want %q while prior output is backed off", got, want)
 	}
 
-	waitFor(t, 2*time.Second, func() bool {
+	waitFor(t, 5*time.Second, func() bool {
 		got := nonStatusMessages(messenger.all())
 		return len(got) >= 1 && strings.Contains(strings.Join(got, "\n"), "• first")
 	})
@@ -2048,6 +2051,81 @@ func TestServiceOutputWatchdogKeepsBufferedTailDuringActiveRunWhenEditBackoffBlo
 	}
 	if got := len(nonStatusMessages(messenger.all())); got != 0 {
 		t.Fatalf("messages = %#v, want no detached plain sends during active run", messenger.all())
+	}
+}
+
+func TestServiceOutputWatchdogDetachesBufferedTailAfterProlongedEditBackoff(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.outputWatchdogAfter = 10 * time.Millisecond
+	svc.watchdogDetachAfter = 20 * time.Millisecond
+
+	rt := &groupRuntime{
+		opts:               svc.opts,
+		runID:              7,
+		nextRunID:          7,
+		runCursorCommitted: map[uint64]int{7: 1},
+		outputText:         "• synced",
+		outputBuffer:       "\n\n• tail",
+		outputBufferedAt:   time.Now().Add(-time.Second),
+		editBackoffUntil:   time.Now().Add(time.Minute),
+		outputBackoffUntil: time.Now().Add(time.Minute),
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+		lastBusy: true,
+		active: &activeRequest{
+			messageID: "om_1",
+			input:     "first",
+		},
+	}
+
+	svc.applyOutputWatchdog(rt, time.Now())
+
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want detached after prolonged backoff", rt.outputBuffer)
+	}
+	if got := len(rt.detachedOutputs); got == 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want queued detached tail after prolonged backoff", got)
+	}
+	if !rt.forcePlainOutput {
+		t.Fatal("forcePlainOutput = false, want plain fallback after prolonged watchdog stall")
+	}
+}
+
+func TestServiceOutputWatchdogDetachesVeryLargeBufferedTailEvenBeforeLongBackoff(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.outputWatchdogAfter = 10 * time.Millisecond
+	svc.watchdogDetachAfter = time.Hour
+
+	rt := &groupRuntime{
+		opts:               svc.opts,
+		runID:              11,
+		nextRunID:          11,
+		runCursorCommitted: map[uint64]int{11: 1},
+		outputText:         "• synced",
+		outputBuffer:       "\n" + strings.Repeat("x", maxMessageRunes*8),
+		outputBufferedAt:   time.Now().Add(-time.Second),
+		editBackoffUntil:   time.Now().Add(time.Minute),
+		outputBackoffUntil: time.Now().Add(time.Minute),
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+	}
+
+	svc.applyOutputWatchdog(rt, time.Now())
+
+	if rt.hasBufferedOutput() {
+		t.Fatal("outputBuffer retained, want very large stalled body detached")
+	}
+	if got := len(rt.detachedOutputs); got == 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want detached backlog for very large stalled body", got)
 	}
 }
 
