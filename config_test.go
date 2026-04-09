@@ -174,7 +174,7 @@ groups:
 	}
 }
 
-func TestParseConfigDefaultsToDockerCodexRuntime(t *testing.T) {
+func TestParseConfigDefaultsToHostCodexRuntime(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
@@ -189,6 +189,25 @@ groups:
 		t.Fatalf("parseConfig() error = %v", err)
 	}
 
+	if got, want := cfg.runtime, "host-codex"; got != want {
+		t.Fatalf("runtime = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigReadsDockerRuntimeFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml", "--runtime", "docker-codex"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
 	if got, want := cfg.runtime, "docker-codex"; got != want {
 		t.Fatalf("runtime = %q, want %q", got, want)
 	}

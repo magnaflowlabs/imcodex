@@ -7,10 +7,11 @@ sessions running in `tmux`.
 
 `v2.2` supports two Codex runtimes:
 
-- `docker-codex`
-  This is the default and recommended production mode.
 - `host-codex`
-  This is opt-in and intended for manual debugging only.
+  This is now the default runtime.
+- `docker-codex`
+  This is opt-in and preferred when you want a pinned, isolated Docker-based
+  Codex environment.
 
 `docker-codex` no longer needs `runtime`, `runtime_config_dir`, or
 `session_command` in YAML. `imcodex` now manages the Docker launcher
@@ -24,43 +25,43 @@ Always required:
 - `tmux`
 - a Lark / Feishu bot or a Telegram bot
 
-Required for the default `docker-codex` runtime:
-
-- `docker`
-- the runtime user must be able to run `docker` without `sudo`
-
-Required only for `--runtime host-codex`:
+Required for the default `host-codex` runtime:
 
 - `nodejs`
 - `npm`
 - `@openai/codex`
 - `bubblewrap`
 
+Required only for `--runtime docker-codex`:
+
+- `docker`
+- the runtime user must be able to run `docker` without `sudo`
+
 ## Install On Ubuntu
 
-Base install for the recommended Docker runtime:
+Base install for the default host runtime:
 
 ```bash
 sudo apt update
-sudo apt install -y tmux docker.io bubblewrap
+sudo apt install -y tmux bubblewrap nodejs npm
+sudo npm install -g @openai/codex
+codex --version
+codex login
+```
+
+If you also want the optional Docker runtime:
+
+```bash
+sudo apt install -y docker.io
 sudo usermod -aG docker "$USER"
 ```
 
 Log out and log back in so the `docker` group change takes effect, then verify:
 
 ```bash
-tmux -V
 docker --version
 docker run --rm hello-world
-```
-
-If you want the optional host runtime as well:
-
-```bash
-sudo apt install -y nodejs npm
-sudo npm install -g @openai/codex
-codex --version
-codex login
+tmux -V
 ```
 
 ## Build
@@ -107,13 +108,19 @@ Path fields support:
 
 ## Run
 
-Recommended Docker runtime:
+Default host runtime:
 
 ```bash
 ./imcodex -config /srv/imcodex/imcodex.yaml
 ```
 
-Explicit Docker runtime:
+Explicit host runtime:
+
+```bash
+./imcodex -config /srv/imcodex/imcodex.yaml --runtime host-codex
+```
+
+Optional Docker runtime:
 
 ```bash
 ./imcodex -config /srv/imcodex/imcodex.yaml --runtime docker-codex
@@ -122,23 +129,17 @@ Explicit Docker runtime:
 Docker runtime with a non-default Codex config directory:
 
 ```bash
-./imcodex -config /srv/imcodex/imcodex.yaml --codex-config-dir ~/.codex
+./imcodex -config /srv/imcodex/imcodex.yaml --runtime docker-codex --codex-config-dir ~/.codex
 ```
 
 Docker runtime with a custom prebuilt image:
 
 ```bash
-./imcodex -config /srv/imcodex/imcodex.yaml
+./imcodex -config /srv/imcodex/imcodex.yaml --runtime docker-codex
 ```
 
 ```yaml
 docker_image: ghcr.io/acme/imcodex-go:1.24
-```
-
-Optional host runtime:
-
-```bash
-./imcodex -config /srv/imcodex/imcodex.yaml --runtime host-codex
 ```
 
 ## Docker Runtime Behavior
@@ -157,14 +158,14 @@ When `imcodex` runs in `docker-codex` mode:
 codex -a never -s danger-full-access --no-alt-screen -C /workspace
 ```
 
-The pinned Docker Codex CLI version for `v2.2.1` is `0.118.0`.
+The pinned Docker Codex CLI version for `v2.2.2` is `0.118.0`.
 
 If you want to prebuild the same image manually:
 
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.118.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.1 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.2 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -177,13 +178,13 @@ Custom images should provide the same runtime contract:
 - writable `/home/agent`
 - `/workspace` as the mounted workspace path
 
-## Host Runtime Caveat
+## Runtime Caveat
 
-`host-codex` is kept for explicit manual use only.
+`host-codex` is now the default because it matches local toolchains more
+directly and avoids forcing everyone through Docker.
 
-It is not the recommended unattended mode because host-installed Codex may show
-upgrade prompts that interrupt the session. If you need stable unattended
-operation, use the default `docker-codex` runtime instead.
+If you need a pinned, isolated Codex CLI for unattended use, prefer explicit
+`--runtime docker-codex`.
 
 ## Compatibility
 
@@ -201,7 +202,8 @@ and `tmux` session reuse continue to work the same way.
 
 ## Message Delivery
 
-`v2.2.1` tightens Telegram delivery behavior without changing the public config
+`v2.2.2` keeps host runtime as the default and also tightens Telegram delivery
+behavior without changing the public config
 surface:
 
 - outbound send/edit/delete/chat-action calls now use bounded request timeouts
@@ -231,5 +233,5 @@ More detailed runtime notes:
 ## Example Startup Log
 
 ```text
-imcodex 2.2.1 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=docker-codex groups=1 jobs=1 base=https://api.telegram.org
+imcodex 2.2.2 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
 ```

@@ -2,7 +2,7 @@
 
 ## Status
 
-Phase 1 shipped in `v2.2.1`.
+Phase 1 shipped in `v2.2.2`.
 
 This document now tracks the remaining cleanup work after the first transport
 stabilization pass.

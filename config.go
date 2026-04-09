@@ -19,7 +19,7 @@ const (
 	defaultUserConfigName = ".imcodex.yaml"
 	defaultPlatform       = "lark"
 	defaultTelegramAPIURL = "https://api.telegram.org"
-	defaultRuntime        = runtimeDockerCodex
+	defaultRuntime        = runtimeHostCodex
 	runtimeHostCodex      = "host-codex"
 	runtimeDockerCodex    = "docker-codex"
 )

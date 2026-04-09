@@ -1,12 +1,12 @@
 # Runtime is selected at startup, not in YAML.
 # Default:
 #   ./imcodex -config /srv/imcodex/imcodex.yaml
-# Explicit Docker runtime:
-#   ./imcodex -config /srv/imcodex/imcodex.yaml --runtime docker-codex
 # Explicit host runtime:
 #   ./imcodex -config /srv/imcodex/imcodex.yaml --runtime host-codex
+# Explicit Docker runtime:
+#   ./imcodex -config /srv/imcodex/imcodex.yaml --runtime docker-codex
 # Optional Docker Codex config dir override:
-#   ./imcodex -config /srv/imcodex/imcodex.yaml --codex-config-dir ~/.codex
+#   ./imcodex -config /srv/imcodex/imcodex.yaml --runtime docker-codex --codex-config-dir ~/.codex
 # Optional Docker image override for docker-codex:
 # docker_image: ghcr.io/acme/imcodex-go:1.24
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Current behavior for `v2.2.1`. This document describes what ships today, not a
+Current behavior for `v2.2.2`. This document describes what ships today, not a
 future proposal.
 
 ## Goals
@@ -39,7 +39,7 @@ future proposal.
 - a detached `429` blocks editable sends during the same backoff window
 - an editable `429` blocks detached sends during the same backoff window
 
-## Behaviors Removed In `v2.2.1`
+## Behaviors Removed In `v2.2.2`
 
 - detached backlog drain loops that send many chunks immediately after a retry
   window
