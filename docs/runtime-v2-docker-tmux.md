@@ -1,13 +1,14 @@
-# Runtime v2.2: Host tmux + Docker Codex
+# Runtime v2.2: Host tmux With Host Or Docker Codex
 
 ## Summary
 
-`v2.2` keeps `tmux` on the host and moves Codex into Docker by default.
+`v2.2` keeps `tmux` on the host and lets Codex run either on the host or in
+Docker.
 
 Runtime selection is now a startup flag:
 
-- default: `docker-codex`
-- explicit host fallback: `--runtime host-codex`
+- default: `host-codex`
+- explicit Docker mode: `--runtime docker-codex`
 
 YAML no longer controls runtime choice.
 
@@ -19,11 +20,13 @@ The older runtime surface had three practical problems:
 2. external wrapper drift
 3. host Codex upgrade prompts interrupting unattended traffic
 
-`v2.2` fixes that by making one path the default:
+`v2.2` fixes that by making startup flags authoritative while keeping Docker as
+an integrated option:
 
 - one `imcodex` binary
 - one embedded Docker launcher
 - one local stable image tag: `imcodex-codex:stable`
+- optional custom prebuilt images via `docker_image`
 
 ## Runtime Flow
 
@@ -37,10 +40,16 @@ For `docker-codex`:
 6. The host Codex config directory is copied into container-local `/home/agent/.codex`.
 7. Codex runs inside the container and the TUI remains visible in the host tmux pane.
 
+If `docker_image` is set in YAML:
+
+1. `imcodex` skips the managed-image rebuild check.
+2. Docker runs the provided image directly.
+3. The same workspace mount and Codex config copy behavior still applies.
+
 For `host-codex`:
 
 1. `imcodex` starts host `codex` directly in the tmux pane.
-2. This mode is supported only when you explicitly pass `--runtime host-codex`.
+2. This is the default when no `--runtime` flag is given.
 
 ## Isolation Model
 
@@ -72,14 +81,15 @@ Replacement startup flags:
 
 ## Stable Codex Version
 
-The Docker runtime for `v2.2.0` pins Codex CLI `0.118.0`.
+The Docker runtime for `v2.2.2` pins Codex CLI `0.118.0`.
 
 That version is baked into the local `stable` image build. This avoids live
 interactive upgrade prompts during production traffic.
 
 ## Operational Notes
 
-- `docker-codex` is the recommended unattended mode.
-- `host-codex` is kept only for explicit debugging or temporary local use.
+- `host-codex` is the default runtime.
+- `docker-codex` remains the better choice when you want a pinned isolated CLI
+  for unattended operation.
 - `imcodex` waits for the Docker-backed Codex prompt before sending chat text,
   so the first prompt is not pasted into an image build shell.

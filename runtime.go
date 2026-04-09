@@ -42,7 +42,7 @@ func maybeRunInternalCommand(args []string) (bool, error) {
 	}
 }
 
-func resolveLaunchCommand(runtime string, codexConfigDir string, executablePath string, lookupEnv func(string) (string, bool)) (string, string, error) {
+func resolveLaunchCommand(runtime string, codexConfigDir string, dockerImage string, executablePath string, lookupEnv func(string) (string, bool)) (string, string, error) {
 	runtime, err := normalizeRuntime(runtime)
 	if err != nil {
 		return "", "", err
@@ -59,7 +59,7 @@ func resolveLaunchCommand(runtime string, codexConfigDir string, executablePath 
 		if err != nil {
 			return "", "", err
 		}
-		return buildInternalDockerLaunchCommand(executablePath, configDir), configDir, nil
+		return buildInternalDockerLaunchCommand(executablePath, configDir, dockerImage), configDir, nil
 	default:
 		return "", "", fmt.Errorf("unsupported runtime: %s", runtime)
 	}
@@ -91,14 +91,18 @@ func resolveExecutablePath(value string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
-func buildInternalDockerLaunchCommand(executablePath string, configDir string) string {
-	return "exec " + shellJoin(
+func buildInternalDockerLaunchCommand(executablePath string, configDir string, image string) string {
+	args := []string{
 		executablePath,
 		internalDockerCodexCommand,
 		"--workspace", "{cwd}",
 		"--session", "{session_name}",
 		"--config-dir", configDir,
-	)
+	}
+	if image = strings.TrimSpace(image); image != "" {
+		args = append(args, "--image", image)
+	}
+	return "exec " + shellJoin(args...)
 }
 
 func shellJoin(args ...string) string {
@@ -138,8 +142,10 @@ func runInternalDockerCodex(args []string) error {
 	if image == "" {
 		image = defaultDockerCodexImage
 	}
-	if err := ensureDockerCodexImage(image); err != nil {
-		return err
+	if shouldEnsureDockerCodexImage(image) {
+		if err := ensureDockerCodexImage(image); err != nil {
+			return err
+		}
 	}
 
 	dockerBin, err := exec.LookPath("docker")
@@ -203,6 +209,10 @@ func ensureDockerCodexImage(image string) error {
 		return fmt.Errorf("build docker image %s: %w", image, err)
 	}
 	return nil
+}
+
+func shouldEnsureDockerCodexImage(image string) bool {
+	return strings.TrimSpace(image) == "" || strings.TrimSpace(image) == defaultDockerCodexImage
 }
 
 func inspectDockerCodexImage(image string) (string, string, error) {

@@ -174,7 +174,7 @@ groups:
 	}
 }
 
-func TestParseConfigDefaultsToDockerCodexRuntime(t *testing.T) {
+func TestParseConfigDefaultsToHostCodexRuntime(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
@@ -189,6 +189,25 @@ groups:
 		t.Fatalf("parseConfig() error = %v", err)
 	}
 
+	if got, want := cfg.runtime, "host-codex"; got != want {
+		t.Fatalf("runtime = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigReadsDockerRuntimeFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml", "--runtime", "docker-codex"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
 	if got, want := cfg.runtime, "docker-codex"; got != want {
 		t.Fatalf("runtime = %q, want %q", got, want)
 	}
@@ -342,6 +361,44 @@ groups:
 	}
 	if cfg.telegramBaseURL != "https://api.telegram.org" {
 		t.Fatalf("telegramBaseURL = %q, want default Telegram API URL", cfg.telegramBaseURL)
+	}
+}
+
+func TestParseConfigNormalizesPlatformCase(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig(nil, nil, readConfig(`
+platform: Telegram
+telegram_bot_token: 123456:abc
+groups:
+  - group_id: -100123
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if got, want := cfg.platform, "telegram"; got != want {
+		t.Fatalf("platform = %q, want %q", got, want)
+	}
+}
+
+func TestParseConfigReadsDockerImage(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig([]string{"-config", "/srv/imcodex/config.yaml"}, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+docker_image: ghcr.io/acme/imcodex-go:1.24
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+	if got, want := cfg.dockerImage, "ghcr.io/acme/imcodex-go:1.24"; got != want {
+		t.Fatalf("dockerImage = %q, want %q", got, want)
 	}
 }
 

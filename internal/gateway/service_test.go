@@ -605,6 +605,57 @@ func TestServiceImageWithoutFilenameUsesContentTypeExtension(t *testing.T) {
 	}
 }
 
+func TestServiceDockerRuntimeUsesVisibleWorkspacePathForAttachments(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cwd := t.TempDir()
+	console := &fakeConsole{captures: []string{"", ""}}
+	messenger := &fakeMessenger{}
+	resources := &fakeResourceFetcher{
+		resources: map[string]DownloadedResource{
+			"om_img|image|img_v3_only": {
+				Data:        []byte("jpeg-bytes"),
+				ContentType: "image/jpeg",
+			},
+		},
+	}
+
+	svc := NewService(ctx, Options{
+		GroupID:     "oc_1",
+		CWD:         cwd,
+		VisibleCWD:  "/workspace",
+		SessionName: "imcodex-demo",
+	}, messenger, console, resources, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_img",
+		GroupID:   "oc_1",
+		Attachments: []IncomingAttachment{
+			{ResourceType: "image", ResourceKey: "img_v3_only"},
+		},
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		return len(console.allSendTexts()) >= 1
+	})
+
+	got := console.allSendTexts()[0]
+	if !strings.Contains(got, "User attached an image: /workspace/.imcodex/inbox/") {
+		t.Fatalf("sendTexts[0] = %q, want container-visible /workspace attachment path", got)
+	}
+	if strings.Contains(got, cwd) {
+		t.Fatalf("sendTexts[0] = %q, want no host cwd in docker-visible attachment path", got)
+	}
+}
+
 func TestServiceForwardsTransientDisconnectDuringAttachmentReply(t *testing.T) {
 	t.Parallel()
 
@@ -929,6 +980,7 @@ func TestServiceRefreshesBaselineBeforeDispatchingNewRequest(t *testing.T) {
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
 	svc.flushIdleTicks = 1
+	svc.detachedSendEvery = 0
 
 	rt := &groupRuntime{
 		opts:         svc.opts,
@@ -1461,7 +1513,7 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 		t.Fatalf("HandleMessage() error = %v", err)
 	}
 
-	waitFor(t, 500*time.Millisecond, func() bool {
+	waitFor(t, 2*time.Second, func() bool {
 		return strings.Contains(strings.Join(messenger.allEvents(), "\n"), workingStatusText)
 	})
 	time.Sleep(200 * time.Millisecond)
@@ -1617,6 +1669,7 @@ func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *tes
 		},
 	}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.detachedSendEvery = 0
 	rt := &groupRuntime{
 		opts:             svc.opts,
 		runID:            6,
@@ -1635,6 +1688,11 @@ func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *tes
 	if got, want := len(rt.detachedOutputs), 1; got != want {
 		t.Fatalf("len(detachedOutputs) after plain 429 = %d, want %d", got, want)
 	}
+	if !rt.outputBackoffUntil.IsZero() {
+		t.Fatal("outputBackoffUntil set too early, want second chunk attempt to trigger rate-limit state")
+	}
+
+	svc.flushDetachedOutputs(rt)
 	if rt.outputBackoffUntil.IsZero() {
 		t.Fatal("outputBackoffUntil = zero, want shared backoff after plain 429")
 	}
@@ -1684,6 +1742,21 @@ func TestServiceWorkingStatusRateLimitDoesNotFallbackOrRetryImmediately(t *testi
 	}
 	if got := messenger.sendCount(); got != 1 {
 		t.Fatalf("sendCount during backoff = %d, want still 1", got)
+	}
+}
+
+func TestServiceWorkingStatusSkipsNonEditableMessenger(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeMessenger{}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{opts: svc.opts}
+
+	if ok := svc.sendWorkingStatus(rt); ok {
+		t.Fatal("sendWorkingStatus() = true, want false for non-editable messenger")
+	}
+	if got := messenger.all(); len(got) != 0 {
+		t.Fatalf("messages = %#v, want no plain working status message", got)
 	}
 }
 
@@ -1993,6 +2066,7 @@ func TestServiceDetachedOutputRetriesChunkWithoutReplay(t *testing.T) {
 		},
 	}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.detachedSendEvery = 0
 	rt := &groupRuntime{
 		opts: svc.opts,
 	}
@@ -2009,7 +2083,12 @@ func TestServiceDetachedOutputRetriesChunkWithoutReplay(t *testing.T) {
 		t.Fatalf("len(messages) after first pass = %d, want %d", got, want)
 	}
 	if got, want := len(rt.detachedOutputs), 1; got != want {
-		t.Fatalf("len(detachedOutputs) after 429 = %d, want %d pending chunk", got, want)
+		t.Fatalf("len(detachedOutputs) after first send = %d, want %d pending chunk", got, want)
+	}
+
+	svc.flushDetachedOutputs(rt)
+	if rt.outputBackoffUntil.IsZero() {
+		t.Fatal("outputBackoffUntil = zero, want shared backoff after second chunk 429")
 	}
 
 	svc.flushDetachedOutputs(rt)
@@ -2035,11 +2114,14 @@ func TestServiceDetachedOutputPreservesBoundaryNewlines(t *testing.T) {
 
 	messenger := &fakeMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.detachedSendEvery = 0
 	rt := &groupRuntime{opts: svc.opts}
 
 	original := strings.Repeat("a", maxMessageRunes-1) + "\n" + strings.Repeat("b", 16)
 	rt.enqueueDetachedOutput(1, original)
-	svc.flushDetachedOutputs(rt)
+	for len(rt.detachedOutputs) > 0 {
+		svc.flushDetachedOutputs(rt)
+	}
 
 	reassembled := strings.Join(messenger.all(), "")
 	if reassembled != original {
@@ -2138,6 +2220,7 @@ func TestServiceDetachedOutputDoesNotDropByCursor(t *testing.T) {
 	messenger := &fakeMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
 	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.detachedSendEvery = 0
 	rt := &groupRuntime{
 		opts: svc.opts,
 		runCursorCommitted: map[uint64]int{
@@ -2149,7 +2232,9 @@ func TestServiceDetachedOutputDoesNotDropByCursor(t *testing.T) {
 		},
 	}
 
-	svc.flushDetachedOutputs(rt)
+	for len(rt.detachedOutputs) > 0 {
+		svc.flushDetachedOutputs(rt)
+	}
 
 	got := messenger.all()
 	if len(got) != 2 || got[0] != "dup" || got[1] != "new" {
@@ -2272,7 +2357,7 @@ func TestServiceOutputWatchdogKeepsBufferedTailDuringActiveRunWhenEditBackoffBlo
 	}
 }
 
-func TestServiceOutputWatchdogDetachesBufferedTailAfterProlongedEditBackoff(t *testing.T) {
+func TestServiceOutputWatchdogKeepsBufferedTailAfterProlongedEditBackoff(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{}
@@ -2303,18 +2388,18 @@ func TestServiceOutputWatchdogDetachesBufferedTailAfterProlongedEditBackoff(t *t
 
 	svc.applyOutputWatchdog(rt, time.Now())
 
-	if rt.hasBufferedOutput() {
-		t.Fatalf("outputBuffer = %q, want detached after prolonged backoff", rt.outputBuffer)
+	if !rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want retained while editable delivery strategy stays unchanged", rt.outputBuffer)
 	}
-	if got := len(rt.detachedOutputs); got == 0 {
-		t.Fatalf("len(detachedOutputs) = %d, want queued detached tail after prolonged backoff", got)
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want 0 when watchdog no longer rewrites body strategy", got)
 	}
-	if !rt.forcePlainOutput {
-		t.Fatal("forcePlainOutput = false, want plain fallback after prolonged watchdog stall")
+	if rt.forcePlainOutput {
+		t.Fatal("forcePlainOutput = true, want watchdog to avoid plain fallback mutation")
 	}
 }
 
-func TestServiceOutputWatchdogDetachesVeryLargeBufferedTailEvenBeforeLongBackoff(t *testing.T) {
+func TestServiceOutputWatchdogKeepsVeryLargeBufferedTailEvenBeforeLongBackoff(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{}
@@ -2339,15 +2424,15 @@ func TestServiceOutputWatchdogDetachesVeryLargeBufferedTailEvenBeforeLongBackoff
 
 	svc.applyOutputWatchdog(rt, time.Now())
 
-	if rt.hasBufferedOutput() {
-		t.Fatal("outputBuffer retained, want very large stalled body detached")
+	if !rt.hasBufferedOutput() {
+		t.Fatal("outputBuffer cleared, want watchdog to keep large editable backlog buffered")
 	}
-	if got := len(rt.detachedOutputs); got == 0 {
-		t.Fatalf("len(detachedOutputs) = %d, want detached backlog for very large stalled body", got)
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want 0 when watchdog does not detach editable backlog", got)
 	}
 }
 
-func TestServiceFallsBackToPlainOutputAfterRepeatedEditableRateLimits(t *testing.T) {
+func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{
@@ -2381,8 +2466,8 @@ func TestServiceFallsBackToPlainOutputAfterRepeatedEditableRateLimits(t *testing
 	rt.editBackoffUntil = time.Time{}
 
 	svc.flushOutputBuffer(rt)
-	if !rt.forcePlainOutput {
-		t.Fatal("forcePlainOutput = false, want fallback after second 429")
+	if rt.forcePlainOutput {
+		t.Fatal("forcePlainOutput = true, want repeated 429s to keep editable strategy")
 	}
 	rt.outputBackoffUntil = time.Time{}
 	rt.editBackoffUntil = time.Time{}
@@ -2390,8 +2475,11 @@ func TestServiceFallsBackToPlainOutputAfterRepeatedEditableRateLimits(t *testing
 	svc.flushOutputBuffer(rt)
 
 	got := nonStatusMessages(messenger.all())
-	if len(got) != 2 || got[0] != "• synced" || got[1] != "• new tail" {
-		t.Fatalf("messages = %#v, want prior editable body plus plain fallback tail", got)
+	if len(got) != 1 || got[0] != "• synced\n• new tail" {
+		t.Fatalf("messages = %#v, want editable body eventually updated in place", got)
+	}
+	if strings.TrimSpace(rt.outputBuffer) != "" {
+		t.Fatalf("outputBuffer = %q, want buffered tail cleared after eventual editable retry", rt.outputBuffer)
 	}
 }
 
@@ -2489,6 +2577,7 @@ func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 
 	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
 	svc.flushIdleTicks = 1
+	svc.detachedSendEvery = 0
 
 	rt := &groupRuntime{
 		opts:         svc.opts,
@@ -3401,7 +3490,7 @@ func TestServiceInterruptsCurrentRunOnNewMessageWhenEnabled(t *testing.T) {
 	})
 }
 
-func TestServiceKeepsOnlyLatestPendingMessageWhileSessionStarts(t *testing.T) {
+func TestServiceKeepsOnlyLatestPendingMessageWhileSessionStartsWhenInterruptEnabled(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3415,7 +3504,12 @@ func TestServiceKeepsOnlyLatestPendingMessageWhileSessionStarts(t *testing.T) {
 	}
 	messenger := &fakeMessenger{}
 
-	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc := NewService(ctx, Options{
+		GroupID:               "oc_1",
+		CWD:                   "/srv/demo",
+		SessionName:           "imcodex-demo",
+		InterruptOnNewMessage: true,
+	}, messenger, console, nil, slog.Default())
 	svc.pollEvery = 10 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
@@ -3446,6 +3540,55 @@ func TestServiceKeepsOnlyLatestPendingMessageWhileSessionStarts(t *testing.T) {
 
 	if got := console.allSendTexts(); len(got) != 1 || got[0] != "third" {
 		t.Fatalf("sendTexts = %#v, want only latest startup message", got)
+	}
+}
+
+func TestServicePreservesStartupMessageOrderWhenInterruptDisabled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ensureBlock := make(chan struct{})
+	console := &fakeConsole{
+		captures:      []string{"", "", "", ""},
+		ensureEntered: make(chan struct{}, 1),
+		ensureBlock:   ensureBlock,
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 10 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.silentBusyGrace = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_1", GroupID: "oc_1", Text: "first"}); err != nil {
+		t.Fatalf("HandleMessage(first) error = %v", err)
+	}
+
+	select {
+	case <-console.ensureEntered:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for ensure session to start")
+	}
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_2", GroupID: "oc_1", Text: "second"}); err != nil {
+		t.Fatalf("HandleMessage(second) error = %v", err)
+	}
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{MessageID: "om_3", GroupID: "oc_1", Text: "third"}); err != nil {
+		t.Fatalf("HandleMessage(third) error = %v", err)
+	}
+
+	close(ensureBlock)
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := console.allSendTexts()
+		return len(got) >= 3
+	})
+
+	if got, want := console.allSendTexts(), []string{"first", "second", "third"}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("sendTexts = %#v, want %#v", got, want)
 	}
 }
 

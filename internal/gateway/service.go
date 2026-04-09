@@ -31,6 +31,8 @@ const (
 	defaultWatchdogDetachAfter = 30 * time.Second
 	defaultEditRolloverAt      = 2800
 	defaultEditableSyncEvery   = 5 * time.Second
+	defaultDetachedSendEvery   = time.Second
+	defaultDeliveryTimeout     = 20 * time.Second
 	defaultSilentBusyGrace     = 20 * time.Minute
 	workingStatusText          = "[working] Codex is processing."
 )
@@ -57,6 +59,7 @@ type DownloadedResource struct {
 type Options struct {
 	GroupID               string
 	CWD                   string
+	VisibleCWD            string
 	SessionName           string
 	LaunchCommand         string
 	InterruptOnNewMessage bool
@@ -115,6 +118,8 @@ type Service struct {
 	watchdogDetachAfter   time.Duration
 	editRolloverAt        int
 	editableSyncEvery     time.Duration
+	detachedSendEvery     time.Duration
+	deliveryTimeout       time.Duration
 	silentBusyGrace       time.Duration
 	interruptForceAfter   time.Duration
 
@@ -157,6 +162,7 @@ type groupRuntime struct {
 	editBackoffUntil     time.Time
 	editRateLimitCount   int
 	lastEditableSyncAt   time.Time
+	nextDetachedSendAt   time.Time
 	deferBodyUntilIdle   bool
 	forcePlainOutput     bool
 	busySince            time.Time
@@ -189,6 +195,9 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 	if opts.SessionName == "" {
 		opts.SessionName = DefaultSessionName(opts.CWD)
 	}
+	if strings.TrimSpace(opts.VisibleCWD) == "" {
+		opts.VisibleCWD = opts.CWD
+	}
 	return &Service{
 		ctx:                   ctx,
 		opts:                  opts,
@@ -209,6 +218,8 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		watchdogDetachAfter:   defaultWatchdogDetachAfter,
 		editRolloverAt:        defaultEditRolloverAt,
 		editableSyncEvery:     defaultEditableSyncEvery,
+		detachedSendEvery:     defaultDetachedSendEvery,
+		deliveryTimeout:       defaultDeliveryTimeout,
 		silentBusyGrace:       defaultSilentBusyGrace,
 		interruptForceAfter:   time.Second,
 	}
@@ -317,7 +328,7 @@ func (s *Service) runGroup(rt *groupRuntime) {
 				s.sendBestEffort(rt.opts.GroupID, fmt.Sprintf("Failed to start Codex session: %v", err))
 				continue
 			}
-			if !wasReady {
+			if !wasReady && s.opts.InterruptOnNewMessage {
 				s.keepLatestPending(rt)
 			}
 			s.flushDetachedOutputs(rt)
@@ -337,7 +348,9 @@ func (s *Service) runGroup(rt *groupRuntime) {
 					s.logger.Warn("retry ensure session failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
 					continue
 				}
-				s.keepLatestPending(rt)
+				if s.opts.InterruptOnNewMessage {
+					s.keepLatestPending(rt)
+				}
 				if !rt.runInFlight() && rt.hasBufferedOutput() {
 					s.flushOutputBuffer(rt)
 				}
@@ -688,7 +701,7 @@ func (s *Service) poll(rt *groupRuntime) {
 		if shouldFlushOnSize(rt, s.editRolloverAt, maxMessageRunes) {
 			s.flushOutputBuffer(rt)
 		} else if becameIdle && strings.TrimSpace(rt.outputBuffer) != "" && s.editableMessenger() != nil {
-			s.flushOutputBufferForced(rt)
+			s.flushOutputBuffer(rt)
 		} else if shouldFlush(rt.outputBuffer, rt.outputBufferedAt, rt.outputBufferedTicks, s.flushIdleTicks, s.busyFlushAfter, now) {
 			s.flushOutputBuffer(rt)
 		}
@@ -749,29 +762,13 @@ func (s *Service) applyOutputWatchdog(rt *groupRuntime, now time.Time) {
 	)
 	s.flushOutputBuffer(rt)
 	editable := s.editableMessenger()
+	if editable != nil {
+		// Keep one body-delivery strategy for editable messengers. Watchdogs may
+		// nudge retries, but should not convert an editable body into detached
+		// plain messages while the run is still active or backing off.
+		return
+	}
 	if rt.hasBufferedOutput() {
-		if editable != nil && len(rt.pending) == 0 &&
-			(s.shouldDeferBodyFlush(rt, now) ||
-				(!rt.editBackoffUntil.IsZero() && rt.editBackoffUntil.After(now)) ||
-				(!rt.outputBackoffUntil.IsZero() && rt.outputBackoffUntil.After(now))) {
-			if !s.shouldForceWatchdogDetach(rt, age, now) {
-				// Keep buffered body in editable mode while deferred/backing off.
-				// Detaching here can turn transient rewritten snapshots into
-				// duplicated plain messages.
-				return
-			}
-			s.logger.Warn(
-				"output watchdog forcing plain fallback",
-				"group_id", rt.opts.GroupID,
-				"run_id", rt.runID,
-				"cursor", rt.runCursor(rt.runID),
-				"age", age.String(),
-				"buffer_len", utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")),
-			)
-			rt.forcePlainOutput = true
-			rt.deferBodyUntilIdle = false
-			rt.editBackoffUntil = time.Time{}
-		}
 		s.detachBufferedOutput(rt)
 	}
 	s.flushDetachedOutputs(rt)
@@ -967,7 +964,11 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 
 func (s *Service) enqueuePending(rt *groupRuntime, msg IncomingMessage) {
 	if !rt.sessionReady {
-		rt.pending = []IncomingMessage{msg}
+		if s.opts.InterruptOnNewMessage {
+			rt.pending = []IncomingMessage{msg}
+		} else {
+			rt.pending = append(rt.pending, msg)
+		}
 		return
 	}
 	if s.opts.InterruptOnNewMessage && rt.runInFlight() {
@@ -1094,9 +1095,33 @@ func (s *Service) materializeInput(msg IncomingMessage) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("save %s attachment: %w", attachmentKind(attachment), err)
 		}
-		parts = append(parts, fmt.Sprintf("User attached %s: %s. Inspect it.", attachmentDescriptor(attachment), path))
+		parts = append(parts, fmt.Sprintf("User attached %s: %s. Inspect it.", attachmentDescriptor(attachment), s.visiblePath(path)))
 	}
 	return strings.Join(parts, "\n\n"), nil
+}
+
+func (s *Service) visiblePath(path string) string {
+	path = strings.TrimSpace(path)
+	cwd := strings.TrimSpace(s.opts.CWD)
+	visibleCWD := strings.TrimSpace(firstNonEmpty(s.opts.VisibleCWD, s.opts.CWD))
+	if path == "" || cwd == "" || visibleCWD == "" {
+		return path
+	}
+	path = filepath.Clean(path)
+	cwd = filepath.Clean(cwd)
+	visibleCWD = filepath.Clean(visibleCWD)
+
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil {
+		return path
+	}
+	if rel == "." {
+		return visibleCWD
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return path
+	}
+	return filepath.Clean(filepath.Join(visibleCWD, rel))
 }
 
 func saveAttachment(inboxDir string, messageID string, index int, attachment IncomingAttachment, resource DownloadedResource) (string, error) {
@@ -1214,6 +1239,71 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func (s *Service) deliveryContext() (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if s != nil && s.ctx != nil {
+		base = s.ctx
+	}
+	if s == nil || s.deliveryTimeout <= 0 {
+		return context.WithCancel(base)
+	}
+	return context.WithTimeout(base, s.deliveryTimeout)
+}
+
+func (s *Service) sendTextToChat(groupID string, text string) error {
+	if s == nil {
+		return errors.New("service is nil")
+	}
+	if s.messenger == nil {
+		return errors.New("messenger is nil")
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	ctx, cancel := s.deliveryContext()
+	defer cancel()
+	return s.messenger.SendTextToChat(ctx, groupID, text)
+}
+
+func (s *Service) sendTextToChatWithID(editable EditableMessenger, groupID string, text string) (SentMessage, error) {
+	if editable == nil {
+		return SentMessage{}, errors.New("editable messenger is nil")
+	}
+	if strings.TrimSpace(text) == "" {
+		return SentMessage{}, nil
+	}
+	ctx, cancel := s.deliveryContext()
+	defer cancel()
+	return editable.SendTextToChatWithID(ctx, groupID, text)
+}
+
+func (s *Service) editTextInChat(editable EditableMessenger, groupID string, messageID string, text string) error {
+	if editable == nil {
+		return errors.New("editable messenger is nil")
+	}
+	ctx, cancel := s.deliveryContext()
+	defer cancel()
+	return editable.EditTextInChat(ctx, groupID, messageID, text)
+}
+
+func (s *Service) deleteMessageInChat(deleter DeleteMessenger, groupID string, messageID string) error {
+	if deleter == nil {
+		return errors.New("delete messenger is nil")
+	}
+	ctx, cancel := s.deliveryContext()
+	defer cancel()
+	return deleter.DeleteMessageInChat(ctx, groupID, messageID)
+}
+
+func (s *Service) sendChatActionToChat(actioner ActionMessenger, groupID string, action string) error {
+	if actioner == nil {
+		return errors.New("action messenger is nil")
+	}
+	ctx, cancel := s.deliveryContext()
+	defer cancel()
+	return actioner.SendChatAction(ctx, groupID, action)
+}
+
 func (s *Service) sendChunked(groupID string, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
@@ -1228,7 +1318,7 @@ func (s *Service) sendChunkedStrict(groupID string, text string) error {
 		return nil
 	}
 	for _, chunk := range splitByRunes(text, maxMessageRunes) {
-		if err := s.messenger.SendTextToChat(context.Background(), groupID, chunk); err != nil {
+		if err := s.sendTextToChat(groupID, chunk); err != nil {
 			return err
 		}
 	}
@@ -1295,18 +1385,12 @@ func (s *Service) sendWorkingStatus(rt *groupRuntime) bool {
 	}
 	editable := s.editableMessenger()
 	if editable == nil {
-		if err := s.messenger.SendTextToChat(context.Background(), rt.opts.GroupID, workingStatusText); err != nil {
-			s.applyAuxBackoff(rt, err, 2*time.Second)
-			s.logger.Warn("send working message failed", "group_id", rt.opts.GroupID, "err", err)
-			return false
-		}
-		rt.workingBackoffUntil = time.Time{}
-		return true
+		return false
 	}
 	if rt.statusMessage.messageID != "" {
 		return true
 	}
-	msg, err := editable.SendTextToChatWithID(context.Background(), rt.opts.GroupID, workingStatusText)
+	msg, err := s.sendTextToChatWithID(editable, rt.opts.GroupID, workingStatusText)
 	if err != nil {
 		s.applyAuxBackoff(rt, err, 2*time.Second)
 		s.logger.Warn("send working message failed", "group_id", rt.opts.GroupID, "err", err)
@@ -1336,7 +1420,7 @@ func (s *Service) sendChatAction(rt *groupRuntime) {
 		return
 	}
 	rt.lastActionAt = now
-	if err := actioner.SendChatAction(context.Background(), rt.opts.GroupID, "typing"); err != nil {
+	if err := s.sendChatActionToChat(actioner, rt.opts.GroupID, "typing"); err != nil {
 		if retryAfter := retryAfterFromRateLimitError(err); retryAfter > 0 {
 			rt.applyOutputBackoff(retryAfter)
 		}
@@ -1444,10 +1528,6 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 			rt.editBackoffUntil = time.Now().Add(retryAfter)
 			rt.applyOutputBackoff(retryAfter)
 			rt.deferBodyUntilIdle = true
-			if rt.editRateLimitCount >= 2 {
-				rt.forcePlainOutput = true
-				rt.deferBodyUntilIdle = false
-			}
 			s.logger.Warn(
 				"sync editable output rate-limited",
 				"group_id",
@@ -1828,7 +1908,6 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 		return
 	}
 	if s.detachedWatchdogAfter > 0 && !rt.detachedOutputs[0].enqueuedAt.IsZero() && now.Sub(rt.detachedOutputs[0].enqueuedAt) >= s.detachedWatchdogAfter {
-		rt.detachedBackoffUntil = time.Time{}
 		s.logger.Warn(
 			"detached output watchdog forcing retry",
 			"group_id", rt.opts.GroupID,
@@ -1843,64 +1922,70 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 		}
 		rt.detachedBackoffUntil = time.Time{}
 	}
+	if !rt.nextDetachedSendAt.IsZero() && rt.nextDetachedSendAt.After(now) {
+		return
+	}
 
-	for len(rt.detachedOutputs) > 0 {
-		item := rt.detachedOutputs[0]
-		if err := s.messenger.SendTextToChat(context.Background(), rt.opts.GroupID, item.text); err != nil {
-			retryAfter := retryAfterFromRateLimitError(err)
-			if retryAfter > 0 {
-				rt.detachedBackoffUntil = time.Now().Add(retryAfter)
-				rt.applyOutputBackoff(retryAfter)
-				rt.detachedRetryCount = 0
-				s.logger.Warn(
-					"flush detached output rate-limited",
-					"group_id",
-					rt.opts.GroupID,
-					"run_id",
-					item.runID,
-					"cursor",
-					item.cursor,
-					"retry_after",
-					retryAfter.String(),
-					"retry_at",
-					rt.outputBackoffUntil,
-					"err",
-					err,
-				)
-				return
-			}
-			rt.detachedRetryCount++
-			retryAfter = time.Duration(rt.detachedRetryCount) * time.Second
-			if retryAfter > 30*time.Second {
-				retryAfter = 30 * time.Second
-			}
+	item := rt.detachedOutputs[0]
+	if err := s.sendTextToChat(rt.opts.GroupID, item.text); err != nil {
+		retryAfter := retryAfterFromRateLimitError(err)
+		if retryAfter > 0 {
 			rt.detachedBackoffUntil = time.Now().Add(retryAfter)
+			rt.applyOutputBackoff(retryAfter)
+			rt.detachedRetryCount = 0
 			s.logger.Warn(
-				"flush detached output failed",
+				"flush detached output rate-limited",
 				"group_id",
 				rt.opts.GroupID,
 				"run_id",
 				item.runID,
 				"cursor",
 				item.cursor,
-				"attempt",
-				rt.detachedRetryCount,
 				"retry_after",
 				retryAfter.String(),
 				"retry_at",
-				rt.detachedBackoffUntil,
-				"queue_len",
-				len(rt.detachedOutputs),
+				rt.outputBackoffUntil,
 				"err",
 				err,
 			)
 			return
 		}
-		rt.detachedOutputs = rt.detachedOutputs[1:]
-		rt.commitCursor(item.runID, item.cursor)
-		rt.detachedRetryCount = 0
-		s.logOutputStateDebug(rt, "detached output committed")
+		rt.detachedRetryCount++
+		retryAfter = time.Duration(rt.detachedRetryCount) * time.Second
+		if retryAfter > 30*time.Second {
+			retryAfter = 30 * time.Second
+		}
+		rt.detachedBackoffUntil = time.Now().Add(retryAfter)
+		s.logger.Warn(
+			"flush detached output failed",
+			"group_id",
+			rt.opts.GroupID,
+			"run_id",
+			item.runID,
+			"cursor",
+			item.cursor,
+			"attempt",
+			rt.detachedRetryCount,
+			"retry_after",
+			retryAfter.String(),
+			"retry_at",
+			rt.detachedBackoffUntil,
+			"queue_len",
+			len(rt.detachedOutputs),
+			"err",
+			err,
+		)
+		return
 	}
+	rt.detachedOutputs = rt.detachedOutputs[1:]
+	rt.commitCursor(item.runID, item.cursor)
+	rt.detachedRetryCount = 0
+	if s.detachedSendEvery > 0 {
+		rt.nextDetachedSendAt = time.Now().Add(s.detachedSendEvery)
+	} else {
+		rt.nextDetachedSendAt = time.Time{}
+	}
+	s.logOutputStateDebug(rt, "detached output committed")
 	if !rt.runInFlight() && !rt.hasPendingOutputDelivery() {
 		s.clearWorkingStatus(rt)
 		rt.workingSent = false
@@ -1932,7 +2017,7 @@ func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenge
 			if freezeCompleted && i < existingCount-1 {
 				continue
 			}
-			if err := editable.EditTextInChat(context.Background(), rt.opts.GroupID, next[i].messageID, segment); err != nil {
+			if err := s.editTextInChat(editable, rt.opts.GroupID, next[i].messageID, segment); err != nil {
 				rt.outputMessages = next
 				return err
 			}
@@ -1940,7 +2025,7 @@ func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenge
 			continue
 		}
 
-		msg, err := editable.SendTextToChatWithID(context.Background(), rt.opts.GroupID, segment)
+		msg, err := s.sendTextToChatWithID(editable, rt.opts.GroupID, segment)
 		if err != nil {
 			rt.outputMessages = next
 			return err
@@ -2003,7 +2088,7 @@ func (s *Service) clearWorkingStatus(rt *groupRuntime) {
 		return
 	}
 	if deleter, ok := editable.(DeleteMessenger); ok {
-		if err := deleter.DeleteMessageInChat(context.Background(), rt.opts.GroupID, messageID); err == nil {
+		if err := s.deleteMessageInChat(deleter, rt.opts.GroupID, messageID); err == nil {
 			rt.workingBackoffUntil = time.Time{}
 			rt.statusMessage = trackedMessage{}
 			return
@@ -2014,7 +2099,7 @@ func (s *Service) clearWorkingStatus(rt *groupRuntime) {
 			s.logger.Warn("delete working message failed", "group_id", rt.opts.GroupID, "message_id", messageID, "err", err)
 		}
 	}
-	if err := editable.EditTextInChat(context.Background(), rt.opts.GroupID, messageID, "…"); err != nil {
+	if err := s.editTextInChat(editable, rt.opts.GroupID, messageID, "…"); err != nil {
 		s.applyAuxBackoff(rt, err, 2*time.Second)
 		s.logger.Warn("neutralize working message failed", "group_id", rt.opts.GroupID, "message_id", messageID, "err", err)
 		return
@@ -2040,7 +2125,7 @@ func (s *Service) pruneStaleEditableMessages(rt *groupRuntime, editable Editable
 			continue
 		}
 		if deleter != nil {
-			if err := deleter.DeleteMessageInChat(context.Background(), rt.opts.GroupID, messageID); err == nil {
+			if err := s.deleteMessageInChat(deleter, rt.opts.GroupID, messageID); err == nil {
 				continue
 			} else if s.applyAuxBackoff(rt, err, 2*time.Second) {
 				kept = append(kept, item)
@@ -2049,7 +2134,7 @@ func (s *Service) pruneStaleEditableMessages(rt *groupRuntime, editable Editable
 		}
 		// Fallback when delete is unavailable/denied: neutralize stale segments
 		// so old long chunks do not remain visible as repeated bodies.
-		if err := editable.EditTextInChat(context.Background(), rt.opts.GroupID, messageID, "…"); err != nil {
+		if err := s.editTextInChat(editable, rt.opts.GroupID, messageID, "…"); err != nil {
 			s.applyAuxBackoff(rt, err, 2*time.Second)
 			s.logger.Warn(
 				"prune stale editable message failed",
@@ -2127,7 +2212,7 @@ func (s *Service) sendBestEffort(groupID string, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	if err := s.messenger.SendTextToChat(context.Background(), groupID, text); err != nil {
+	if err := s.sendTextToChat(groupID, text); err != nil {
 		s.logger.Error("send chat message failed", "group_id", groupID, "err", err)
 	}
 }

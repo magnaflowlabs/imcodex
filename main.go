@@ -27,7 +27,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	launchCommand, resolvedCodexConfigDir, err := resolveLaunchCommand(cfg.runtime, cfg.codexConfigDir, mustExecutablePath(), os.LookupEnv)
+	launchCommand, resolvedCodexConfigDir, err := resolveLaunchCommand(cfg.runtime, cfg.codexConfigDir, cfg.dockerImage, mustExecutablePath(), os.LookupEnv)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -47,6 +47,7 @@ func main() {
 		options = append(options, gateway.Options{
 			GroupID:               group.GroupID,
 			CWD:                   group.CWD,
+			VisibleCWD:            visibleCWDForRuntime(cfg.runtime, group.CWD),
 			SessionName:           firstNonEmpty(group.SessionName, gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD)),
 			LaunchCommand:         launchCommand,
 			InterruptOnNewMessage: cfg.interruptOnNewMessage,
@@ -83,6 +84,13 @@ func main() {
 	}
 
 	<-ctx.Done()
+}
+
+func visibleCWDForRuntime(runtime string, cwd string) string {
+	if runtime == runtimeDockerCodex {
+		return dockerWorkspaceDir
+	}
+	return cwd
 }
 
 func buildRouter(ctx context.Context, cfg config, launchCommand string, options []gateway.Options, console gateway.Console, startFuncs *[]func(context.Context) error, baseURL *string) (*gateway.Router, error) {

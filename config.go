@@ -19,7 +19,7 @@ const (
 	defaultUserConfigName = ".imcodex.yaml"
 	defaultPlatform       = "lark"
 	defaultTelegramAPIURL = "https://api.telegram.org"
-	defaultRuntime        = runtimeDockerCodex
+	defaultRuntime        = runtimeHostCodex
 	runtimeHostCodex      = "host-codex"
 	runtimeDockerCodex    = "docker-codex"
 )
@@ -28,6 +28,7 @@ type config struct {
 	path                  string
 	platform              string
 	runtime               string
+	dockerImage           string
 	larkAppID             string
 	larkAppSecret         string
 	larkBaseURL           string
@@ -62,6 +63,7 @@ type fileConfig struct {
 	LarkBaseURL           string        `yaml:"lark_base_url"`
 	TelegramBotToken      string        `yaml:"telegram_bot_token"`
 	TelegramBaseURL       string        `yaml:"telegram_base_url"`
+	DockerImage           string        `yaml:"docker_image"`
 	Runtime               string        `yaml:"runtime"`
 	RuntimeConfigDir      string        `yaml:"runtime_config_dir"`
 	SessionCommand        string        `yaml:"session_command"`
@@ -117,6 +119,7 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 		path:                  path,
 		platform:              firstNonEmpty(file.Platform, envValue(lookupEnv, "IMCODEX_PLATFORM"), defaultPlatform),
 		runtime:               runtime,
+		dockerImage:           firstNonEmpty(file.DockerImage, envValue(lookupEnv, "IMCODEX_DOCKER_IMAGE")),
 		larkAppID:             firstNonEmpty(file.LarkAppID, envValue(lookupEnv, "LARK_APP_ID")),
 		larkAppSecret:         firstNonEmpty(file.LarkAppSecret, envValue(lookupEnv, "LARK_APP_SECRET")),
 		larkBaseURL:           firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
@@ -188,7 +191,8 @@ func normalizeGroups(groups []groupConfig, configPath string, lookupEnv func(str
 	return out
 }
 
-func (c config) validate() error {
+func (c *config) validate() error {
+	c.dockerImage = strings.TrimSpace(c.dockerImage)
 	c.platform = strings.ToLower(strings.TrimSpace(c.platform))
 	if c.platform == "" {
 		c.platform = defaultPlatform
