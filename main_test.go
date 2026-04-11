@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/magnaflowlabs/imcodex/internal/gateway"
+)
 
 func TestBuildScheduledJobsUsesProvidedLaunchCommand(t *testing.T) {
 	t.Parallel()
@@ -69,5 +74,16 @@ func TestBuildScheduledJobsLeavesLaunchCommandEmptyForHostCodex(t *testing.T) {
 	}
 	if jobs[0].LaunchCommand != "" {
 		t.Fatalf("job launch_command = %q, want empty host default", jobs[0].LaunchCommand)
+	}
+}
+
+func TestBuildRouterRejectsUnsupportedPlatform(t *testing.T) {
+	t.Parallel()
+
+	startFuncs := []func(context.Context) error{}
+	baseURL := ""
+	_, err := buildRouter(context.Background(), config{platform: "unknown"}, "", nil, gateway.Console(nil), &startFuncs, &baseURL)
+	if err == nil {
+		t.Fatal("buildRouter() error = nil, want unsupported platform error")
 	}
 }

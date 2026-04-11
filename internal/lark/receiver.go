@@ -38,13 +38,13 @@ type postBody struct {
 	Content [][]postElement `json:"content"`
 }
 
-func NewReceiver(appID string, appSecret string, baseURL string, handler MessageHandler) *Receiver {
+func NewReceiver(appID string, appSecret string, baseURL string, verificationToken string, encryptKey string, handler MessageHandler) *Receiver {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		baseURL = larksdk.LarkBaseUrl
 	}
 
-	dispatcher := newEventDispatcher(handler)
+	dispatcher := newEventDispatcher(handler, verificationToken, encryptKey)
 
 	client := larkws.NewClient(
 		appID,
@@ -57,8 +57,8 @@ func NewReceiver(appID string, appSecret string, baseURL string, handler Message
 	return &Receiver{start: client.Start}
 }
 
-func newEventDispatcher(handler MessageHandler) *larkdispatcher.EventDispatcher {
-	return larkdispatcher.NewEventDispatcher("", "").
+func newEventDispatcher(handler MessageHandler, verificationToken string, encryptKey string) *larkdispatcher.EventDispatcher {
+	return larkdispatcher.NewEventDispatcher(strings.TrimSpace(verificationToken), strings.TrimSpace(encryptKey)).
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			msg, ok, err := eventToIncomingMessage(event)
 			if err != nil || !ok {

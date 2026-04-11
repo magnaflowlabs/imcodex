@@ -17,12 +17,20 @@ import (
 )
 
 type fakeMessenger struct {
-	mu       sync.Mutex
-	texts    []string
-	sendErrs []error
+	mu        sync.Mutex
+	texts     []string
+	sendErrs  []error
+	sendBlock <-chan struct{}
 }
 
-func (f *fakeMessenger) SendTextToChat(_ context.Context, _ string, text string) error {
+func (f *fakeMessenger) SendTextToChat(ctx context.Context, _ string, text string) error {
+	if f.sendBlock != nil {
+		select {
+		case <-f.sendBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.sendErrs) > 0 {
@@ -55,6 +63,8 @@ type fakeEditableMessenger struct {
 	editErrs   []error
 	delErrs    []error
 	actionErrs []error
+	sendBlock  <-chan struct{}
+	editBlock  <-chan struct{}
 	edits      int
 	sends      int
 	actions    int
@@ -65,7 +75,14 @@ func (f *fakeEditableMessenger) SendTextToChat(ctx context.Context, groupID stri
 	return err
 }
 
-func (f *fakeEditableMessenger) SendTextToChatWithID(_ context.Context, _ string, text string) (SentMessage, error) {
+func (f *fakeEditableMessenger) SendTextToChatWithID(ctx context.Context, _ string, text string) (SentMessage, error) {
+	if f.sendBlock != nil {
+		select {
+		case <-f.sendBlock:
+		case <-ctx.Done():
+			return SentMessage{}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sends++
@@ -86,7 +103,14 @@ func (f *fakeEditableMessenger) SendTextToChatWithID(_ context.Context, _ string
 	return SentMessage{MessageID: id}, nil
 }
 
-func (f *fakeEditableMessenger) EditTextInChat(_ context.Context, _ string, messageID string, text string) error {
+func (f *fakeEditableMessenger) EditTextInChat(ctx context.Context, _ string, messageID string, text string) error {
+	if f.editBlock != nil {
+		select {
+		case <-f.editBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.edits++
@@ -799,6 +823,49 @@ func TestServiceStreamsScrolledSnapshotWithoutRepeatingPrefix(t *testing.T) {
 	}
 	if len(outputs) != 1 {
 		t.Fatalf("len(outputs) = %d, want 1", len(outputs))
+	}
+}
+
+func TestServiceIgnoresHollowBulletWorkingTimerTicks(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"",
+			"◦ Working (28s • esc to interrupt)",
+			"◦ Working (30s • esc to interrupt)",
+			"◦ Working (1m 01s • esc to interrupt)",
+			"• final answer",
+			"• final answer",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "reply",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 1 && got[0] == "• final answer"
+	})
+
+	if got := nonStatusMessages(messenger.all()); len(got) != 1 || got[0] != "• final answer" {
+		t.Fatalf("messages = %#v, want only final answer without working timer replays", messenger.all())
 	}
 }
 
@@ -1675,7 +1742,7 @@ func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *tes
 		runID:            6,
 		nextRunID:        6,
 		forcePlainOutput: true,
-		outputBuffer:     strings.Repeat("x", maxMessageRunes+16),
+		outputBuffer:     strings.Repeat("x", maxDetachedMessageRunes+16),
 		outputBufferedAt: time.Now(),
 	}
 
@@ -1710,8 +1777,172 @@ func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *tes
 	if got, want := len(final), 2; got != want {
 		t.Fatalf("len(messages) after detached retry = %d, want %d", got, want)
 	}
-	if got := final[0] + final[1]; got != strings.Repeat("x", maxMessageRunes+16) {
+	if got := final[0] + final[1]; got != strings.Repeat("x", maxDetachedMessageRunes+16) {
 		t.Fatalf("reassembled plain fallback output = %q, want exact original text", got)
+	}
+}
+
+func TestNextDetachedSendBatchMergesConsecutiveSmallChunks(t *testing.T) {
+	t.Parallel()
+
+	items := []detachedOutput{
+		{runID: 7, cursor: 1, text: "alpha "},
+		{runID: 7, cursor: 2, text: "beta "},
+		{runID: 7, cursor: 3, text: "gamma"},
+	}
+
+	batch := nextDetachedSendBatch(items, maxDetachedMessageRunes)
+	if got, want := batch.count, 3; got != want {
+		t.Fatalf("batch.count = %d, want %d", got, want)
+	}
+	if got, want := batch.cursor, 3; got != want {
+		t.Fatalf("batch.cursor = %d, want %d", got, want)
+	}
+	if got, want := batch.text, "alpha beta gamma"; got != want {
+		t.Fatalf("batch.text = %q, want %q", got, want)
+	}
+}
+
+func TestNextDetachedSendBatchKeepsExactQueuedChunkBytes(t *testing.T) {
+	t.Parallel()
+
+	items := []detachedOutput{
+		{runID: 7, cursor: 1, text: "abcXYZ"},
+		{runID: 7, cursor: 2, text: "XYZdef"},
+	}
+
+	batch := nextDetachedSendBatch(items, maxDetachedMessageRunes)
+	if got, want := batch.count, 2; got != want {
+		t.Fatalf("batch.count = %d, want %d", got, want)
+	}
+	if got, want := batch.text, "abcXYZXYZdef"; got != want {
+		t.Fatalf("batch.text = %q, want %q", got, want)
+	}
+}
+
+func TestNewServiceDefaultsFastOutputCadence(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	if got, want := svc.pollEvery, 100*time.Millisecond; got != want {
+		t.Fatalf("pollEvery = %s, want %s", got, want)
+	}
+	if got, want := svc.busyFlushAfter, time.Second; got != want {
+		t.Fatalf("busyFlushAfter = %s, want %s", got, want)
+	}
+	if got, want := svc.editableSyncEvery, time.Second; got != want {
+		t.Fatalf("editableSyncEvery = %s, want %s", got, want)
+	}
+	if got, want := svc.detachedSendEvery, time.Second; got != want {
+		t.Fatalf("detachedSendEvery = %s, want %s", got, want)
+	}
+}
+
+func TestServicePollContinuesWhileDetachedSendInFlight(t *testing.T) {
+	t.Parallel()
+
+	block := make(chan struct{})
+	messenger := &fakeMessenger{sendBlock: block}
+	console := &fakeConsole{captures: []string{"first\nsecond"}}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.detachedSendEvery = 0
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		session:      svc.opts.SessionName,
+		sessionReady: true,
+		outputArmed:  true,
+		lastText:     "first",
+		outputText:   "first",
+		detachedOutputs: []detachedOutput{
+			{runID: 1, cursor: 1, text: "first", enqueuedAt: time.Now()},
+		},
+		deliveryDone: make(chan deliveryCompletion, 8),
+	}
+
+	svc.flushDetachedOutputs(rt)
+	if !rt.deliveryInFlight {
+		t.Fatal("deliveryInFlight = false, want detached send scheduled asynchronously")
+	}
+
+	svc.poll(rt)
+	if got, want := strings.TrimSpace(rt.outputBuffer), "second"; got != want {
+		t.Fatalf("outputBuffer = %q, want %q while detached send is in flight", got, want)
+	}
+
+	close(block)
+	applyNextDelivery(t, rt)
+
+	if got := messenger.all(); len(got) != 1 || got[0] != "first" {
+		t.Fatalf("messages = %#v, want detached head delivered once", got)
+	}
+}
+
+func TestServiceEditableDeliveryKeepsNewTailBufferedWhileEditInFlight(t *testing.T) {
+	t.Parallel()
+
+	block := make(chan struct{})
+	messenger := &fakeEditableMessenger{
+		messages: []trackedMessage{
+			{messageID: "1", text: "• first"},
+		},
+		editBlock: block,
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 0
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            2,
+		nextRunID:        2,
+		outputText:       "• first",
+		outputBuffer:     "\n• second",
+		outputBufferedAt: time.Now(),
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• first"},
+		},
+		deliveryDone: make(chan deliveryCompletion, 8),
+	}
+
+	svc.flushOutputBuffer(rt)
+	if !rt.deliveryInFlight {
+		t.Fatal("deliveryInFlight = false, want editable send scheduled asynchronously")
+	}
+
+	rt.appendOutputBuffer("\n• third", time.Now())
+	close(block)
+	applyNextDelivery(t, rt)
+
+	if got, want := rt.outputText, "• first\n• second"; got != want {
+		t.Fatalf("outputText = %q, want %q after first editable delivery", got, want)
+	}
+	if got, want := strings.TrimSpace(rt.outputBuffer), "• third"; got != want {
+		t.Fatalf("outputBuffer = %q, want %q tail retained while edit was in flight", got, want)
+	}
+	if got := messenger.all(); len(got) != 1 || got[0] != "• first\n• second" {
+		t.Fatalf("messages = %#v, want editable body updated once", got)
+	}
+}
+
+func TestServiceDetachedSendSpacingUsesCatchUpWindowAfterRunCompletes(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	svc.detachedSendEvery = 3 * time.Second
+
+	busy := &groupRuntime{
+		opts:            svc.opts,
+		active:          &activeRequest{messageID: "om_1"},
+		detachedOutputs: []detachedOutput{{runID: 1, cursor: 1, text: "one"}, {runID: 1, cursor: 2, text: "two"}},
+	}
+	if got, want := svc.detachedSendSpacing(busy), 3*time.Second; got != want {
+		t.Fatalf("detachedSendSpacing(busy) = %s, want %s", got, want)
+	}
+
+	idle := &groupRuntime{
+		opts:            svc.opts,
+		detachedOutputs: []detachedOutput{{runID: 1, cursor: 1, text: "one"}, {runID: 1, cursor: 2, text: "two"}},
+	}
+	if got, want := svc.detachedSendSpacing(idle), detachedCatchUpSendEvery; got != want {
+		t.Fatalf("detachedSendSpacing(idle) = %s, want %s", got, want)
 	}
 }
 
@@ -2071,7 +2302,7 @@ func TestServiceDetachedOutputRetriesChunkWithoutReplay(t *testing.T) {
 		opts: svc.opts,
 	}
 
-	original := strings.Repeat("x", maxMessageRunes+16)
+	original := strings.Repeat("x", maxDetachedMessageRunes+16)
 	rt.enqueueDetachedOutput(1, original)
 	if got, want := len(rt.detachedOutputs), 2; got != want {
 		t.Fatalf("len(detachedOutputs) = %d, want %d chunked detached queue", got, want)
@@ -2237,8 +2468,8 @@ func TestServiceDetachedOutputDoesNotDropByCursor(t *testing.T) {
 	}
 
 	got := messenger.all()
-	if len(got) != 2 || got[0] != "dup" || got[1] != "new" {
-		t.Fatalf("messages = %#v, want both queued chunks delivered", got)
+	if strings.Join(got, "") != "dupnew" {
+		t.Fatalf("messages = %#v, want both queued chunks delivered without loss", got)
 	}
 	if len(rt.detachedOutputs) != 0 {
 		t.Fatalf("len(detachedOutputs) = %d, want 0", len(rt.detachedOutputs))
@@ -2480,6 +2711,56 @@ func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testin
 	}
 	if strings.TrimSpace(rt.outputBuffer) != "" {
 		t.Fatalf("outputBuffer = %q, want buffered tail cleared after eventual editable retry", rt.outputBuffer)
+	}
+}
+
+func TestServiceFallsBackToDetachedAfterSevereEditableRateLimit(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{
+		messages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+		editErrs: []error{
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 38 retry_after=38"),
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.detachedSendEvery = 0
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            10,
+		nextRunID:        10,
+		outputText:       "• synced",
+		outputBuffer:     "\n• detached tail",
+		outputBufferedAt: time.Now(),
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+	}
+
+	svc.flushOutputBuffer(rt)
+
+	if !rt.forcePlainOutput {
+		t.Fatal("forcePlainOutput = false, want severe editable 429 to switch strategy")
+	}
+	if rt.deferBodyUntilIdle {
+		t.Fatal("deferBodyUntilIdle = true, want detached fallback to clear editable deferral")
+	}
+	if got := len(rt.detachedOutputs); got != 1 {
+		t.Fatalf("len(detachedOutputs) = %d, want 1 queued detached tail", got)
+	}
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want tail moved into detached queue", rt.outputBuffer)
+	}
+
+	rt.outputBackoffUntil = time.Time{}
+	svc.flushDetachedOutputs(rt)
+
+	got := nonStatusMessages(messenger.all())
+	if len(got) != 2 || got[0] != "• synced" || got[1] != "• detached tail" {
+		t.Fatalf("messages = %#v, want existing editable body preserved plus detached tail delivery", got)
 	}
 }
 
@@ -3735,4 +4016,18 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for condition")
+}
+
+func applyNextDelivery(t *testing.T, rt *groupRuntime) {
+	t.Helper()
+
+	select {
+	case completion := <-rt.deliveryDone:
+		rt.deliveryInFlight = false
+		if completion.apply != nil {
+			completion.apply()
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("delivery completion timed out")
+	}
 }

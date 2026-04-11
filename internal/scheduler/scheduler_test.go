@@ -314,6 +314,44 @@ func TestCommandJobPostsFailureWithStageHint(t *testing.T) {
 	}
 }
 
+func TestCommandJobDoesNotReuseStaleSummaryFile(t *testing.T) {
+	t.Parallel()
+
+	cwd := t.TempDir()
+	summaryFile := filepath.Join(cwd, "summary.md")
+	if err := os.WriteFile(summaryFile, []byte("stale summary\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(summary) error = %v", err)
+	}
+	messenger := &fakeMessenger{}
+	job := &jobRunner{
+		job: Job{
+			GroupID:     "oc_1",
+			CWD:         cwd,
+			Name:        "stale_summary",
+			Schedule:    "1 * * * *",
+			Command:     "printf 'fresh output\\n'",
+			SummaryFile: summaryFile,
+		},
+		messenger: messenger,
+		logger:    slog.Default(),
+	}
+
+	if err := job.run(context.Background()); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+
+	outputs := messenger.all()
+	if len(outputs) != 1 {
+		t.Fatalf("len(outputs) = %d, want 1", len(outputs))
+	}
+	if strings.Contains(outputs[0], "stale summary") {
+		t.Fatalf("outputs[0] = %q, want stale summary cleared before run", outputs[0])
+	}
+	if !strings.Contains(outputs[0], "fresh output") {
+		t.Fatalf("outputs[0] = %q, want stdout fallback when summary file stays empty", outputs[0])
+	}
+}
+
 func TestBufferGroupConcurrentWrite(t *testing.T) {
 	t.Parallel()
 

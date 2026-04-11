@@ -17,6 +17,9 @@ platform: lark
 # Use https://open.feishu.cn for Feishu China tenants.
 lark_app_id: cli_xxx
 lark_app_secret: your_app_secret
+# Optional for encrypted event payloads / challenge verification:
+# lark_verification_token: your_verification_token
+# lark_encrypt_key: your_encrypt_key
 lark_base_url: https://open.larksuite.com
 
 # Telegram

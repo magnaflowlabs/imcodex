@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/magnaflowlabs/imcodex/internal/gateway"
@@ -26,6 +27,7 @@ type Poller struct {
 	groupIDs []string
 	logger   *slog.Logger
 	interval time.Duration
+	mu       sync.Mutex
 	cursors  map[string]pollCursor
 }
 
@@ -84,15 +86,21 @@ func (p *Poller) Start(ctx context.Context) error {
 }
 
 func (p *Poller) pollAll(ctx context.Context) {
+	var wg sync.WaitGroup
 	for _, groupID := range p.groupIDs {
-		if err := p.pollGroup(ctx, groupID); err != nil && ctx.Err() == nil {
-			p.logger.Warn("poll lark messages failed", "group_id", groupID, "err", err)
-		}
+		wg.Add(1)
+		go func(groupID string) {
+			defer wg.Done()
+			if err := p.pollGroup(ctx, groupID); err != nil && ctx.Err() == nil {
+				p.logger.Warn("poll lark messages failed", "group_id", groupID, "err", err)
+			}
+		}(groupID)
 	}
+	wg.Wait()
 }
 
 func (p *Poller) pollGroup(ctx context.Context, groupID string) error {
-	cursor := p.cursors[groupID]
+	cursor := p.loadCursor(groupID)
 	listed, err := p.client.ListChatMessagesSince(ctx, groupID, cursor.createdAtMillis)
 	if err != nil {
 		return err
@@ -120,6 +128,22 @@ func (p *Poller) pollGroup(ctx context.Context, groupID string) error {
 		cursor.messageIDs[item.Message.MessageID] = struct{}{}
 	}
 
-	p.cursors[groupID] = cursor
+	p.storeCursor(groupID, cursor)
 	return nil
+}
+
+func (p *Poller) loadCursor(groupID string) pollCursor {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cursor := p.cursors[groupID]
+	if cursor.messageIDs == nil {
+		cursor.messageIDs = make(map[string]struct{})
+	}
+	return cursor
+}
+
+func (p *Poller) storeCursor(groupID string, cursor pollCursor) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cursors[groupID] = cursor
 }

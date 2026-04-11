@@ -14,6 +14,7 @@ const (
 	controlPaneRole   = "@imcodex-pane-role"
 	controlWindowName = "imcodex"
 	readyPollEvery    = 250 * time.Millisecond
+	hostReadyWait     = 30 * time.Second
 	dockerReadyWait   = 2 * time.Minute
 )
 
@@ -67,33 +68,17 @@ func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, err
 	if wait <= 0 {
 		wait = 4 * time.Second
 	}
-	time.Sleep(wait)
 
-	if ok, err := c.hasSession(ctx, spec.SessionName); err != nil {
-		return false, err
-	} else if !ok {
-		return false, fmt.Errorf("tmux session %s exited immediately; check cwd and codex startup", spec.SessionName)
-	}
-
+	timeout := wait
 	if strings.TrimSpace(spec.LaunchCommand) != "" {
-		timeout := wait
 		if timeout < dockerReadyWait {
 			timeout = dockerReadyWait
 		}
-		if err := c.waitForPrompt(ctx, spec, timeout); err != nil {
-			return false, err
-		}
-		return created, nil
+	} else if timeout < hostReadyWait {
+		timeout = hostReadyWait
 	}
-
-	if spec.AutoPressEnterOnTrustPrompt {
-		snapshot, err := c.Capture(ctx, spec.SessionName, 80)
-		if err == nil && IsTrustPrompt(snapshot) {
-			if err := c.sendKey(ctx, spec.SessionName, "Enter"); err != nil {
-				return false, err
-			}
-			time.Sleep(wait / 2)
-		}
+	if err := c.waitForPrompt(ctx, spec, timeout); err != nil {
+		return false, err
 	}
 
 	return created, nil
@@ -134,7 +119,7 @@ func (c *Client) waitForPrompt(ctx context.Context, spec SessionSpec, timeout ti
 }
 
 func (c *Client) SendText(ctx context.Context, session string, text string) error {
-	bufferName := "imcodex-" + sanitizeToken(session)
+	bufferName := "imcodex-" + SanitizeName(session)
 	bufferPath, err := c.writeBufferFile(text)
 	if err != nil {
 		return err
@@ -451,25 +436,4 @@ func shellQuote(in string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(in, "'", `'\''`) + "'"
-}
-
-func sanitizeToken(in string) string {
-	var b strings.Builder
-	for _, r := range in {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r + ('a' - 'A'))
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		return "session"
-	}
-	return out
 }

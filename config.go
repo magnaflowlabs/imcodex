@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	larksdk "github.com/larksuite/oapi-sdk-go/v3"
+	"github.com/magnaflowlabs/imcodex/internal/xutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,6 +23,7 @@ const (
 	defaultRuntime        = runtimeHostCodex
 	runtimeHostCodex      = "host-codex"
 	runtimeDockerCodex    = "docker-codex"
+	redactedConfigValue   = "[REDACTED]"
 )
 
 type config struct {
@@ -31,6 +33,8 @@ type config struct {
 	dockerImage           string
 	larkAppID             string
 	larkAppSecret         string
+	larkVerificationToken string
+	larkEncryptKey        string
 	larkBaseURL           string
 	telegramBotToken      string
 	telegramBaseURL       string
@@ -60,6 +64,8 @@ type fileConfig struct {
 	Platform              string        `yaml:"platform"`
 	LarkAppID             string        `yaml:"lark_app_id"`
 	LarkAppSecret         string        `yaml:"lark_app_secret"`
+	LarkVerificationToken string        `yaml:"lark_verification_token"`
+	LarkEncryptKey        string        `yaml:"lark_encrypt_key"`
 	LarkBaseURL           string        `yaml:"lark_base_url"`
 	TelegramBotToken      string        `yaml:"telegram_bot_token"`
 	TelegramBaseURL       string        `yaml:"telegram_base_url"`
@@ -69,6 +75,53 @@ type fileConfig struct {
 	SessionCommand        string        `yaml:"session_command"`
 	InterruptOnNewMessage *bool         `yaml:"interrupt_on_new_message"`
 	Groups                []groupConfig `yaml:"groups"`
+}
+
+func (c config) String() string {
+	return fmt.Sprintf(
+		"config{path:%q platform:%q runtime:%q dockerImage:%q larkAppID:%q larkAppSecret:%q larkVerificationToken:%q larkEncryptKey:%q larkBaseURL:%q telegramBotToken:%q telegramBaseURL:%q codexConfigDir:%q interruptOnNewMessage:%t groups:%d}",
+		c.path,
+		c.platform,
+		c.runtime,
+		c.dockerImage,
+		redactConfigSecretValue(c.larkAppID),
+		redactConfigSecretValue(c.larkAppSecret),
+		redactConfigSecretValue(c.larkVerificationToken),
+		redactConfigSecretValue(c.larkEncryptKey),
+		c.larkBaseURL,
+		redactConfigSecretValue(c.telegramBotToken),
+		c.telegramBaseURL,
+		c.codexConfigDir,
+		c.interruptOnNewMessage,
+		len(c.groups),
+	)
+}
+
+func (f fileConfig) String() string {
+	return fmt.Sprintf(
+		"fileConfig{platform:%q larkAppID:%q larkAppSecret:%q larkVerificationToken:%q larkEncryptKey:%q larkBaseURL:%q telegramBotToken:%q telegramBaseURL:%q dockerImage:%q runtime:%q runtimeConfigDir:%q sessionCommand:%q interruptOnNewMessage:%t groups:%d}",
+		f.Platform,
+		redactConfigSecretValue(f.LarkAppID),
+		redactConfigSecretValue(f.LarkAppSecret),
+		redactConfigSecretValue(f.LarkVerificationToken),
+		redactConfigSecretValue(f.LarkEncryptKey),
+		f.LarkBaseURL,
+		redactConfigSecretValue(f.TelegramBotToken),
+		f.TelegramBaseURL,
+		f.DockerImage,
+		f.Runtime,
+		f.RuntimeConfigDir,
+		f.SessionCommand,
+		boolValue(f.InterruptOnNewMessage, false),
+		len(f.Groups),
+	)
+}
+
+func redactConfigSecretValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return redactedConfigValue
 }
 
 func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile func(string) ([]byte, error)) (config, error) {
@@ -117,18 +170,21 @@ func parseConfig(args []string, lookupEnv func(string) (string, bool), readFile 
 
 	cfg := config{
 		path:                  path,
-		platform:              firstNonEmpty(file.Platform, envValue(lookupEnv, "IMCODEX_PLATFORM"), defaultPlatform),
+		platform:              xutil.FirstNonEmpty(file.Platform, envValue(lookupEnv, "IMCODEX_PLATFORM"), defaultPlatform),
 		runtime:               runtime,
-		dockerImage:           firstNonEmpty(file.DockerImage, envValue(lookupEnv, "IMCODEX_DOCKER_IMAGE")),
-		larkAppID:             firstNonEmpty(file.LarkAppID, envValue(lookupEnv, "LARK_APP_ID")),
-		larkAppSecret:         firstNonEmpty(file.LarkAppSecret, envValue(lookupEnv, "LARK_APP_SECRET")),
-		larkBaseURL:           firstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
-		telegramBotToken:      firstNonEmpty(file.TelegramBotToken, envValue(lookupEnv, "TELEGRAM_BOT_TOKEN")),
-		telegramBaseURL:       firstNonEmpty(file.TelegramBaseURL, envValue(lookupEnv, "TELEGRAM_BASE_URL"), defaultTelegramAPIURL),
+		dockerImage:           xutil.FirstNonEmpty(file.DockerImage, envValue(lookupEnv, "IMCODEX_DOCKER_IMAGE")),
+		larkAppID:             xutil.FirstNonEmpty(file.LarkAppID, envValue(lookupEnv, "LARK_APP_ID")),
+		larkAppSecret:         xutil.FirstNonEmpty(file.LarkAppSecret, envValue(lookupEnv, "LARK_APP_SECRET")),
+		larkVerificationToken: xutil.FirstNonEmpty(file.LarkVerificationToken, envValue(lookupEnv, "LARK_VERIFICATION_TOKEN")),
+		larkEncryptKey:        xutil.FirstNonEmpty(file.LarkEncryptKey, envValue(lookupEnv, "LARK_ENCRYPT_KEY")),
+		larkBaseURL:           xutil.FirstNonEmpty(file.LarkBaseURL, envValue(lookupEnv, "LARK_BASE_URL"), larksdk.LarkBaseUrl),
+		telegramBotToken:      xutil.FirstNonEmpty(file.TelegramBotToken, envValue(lookupEnv, "TELEGRAM_BOT_TOKEN")),
+		telegramBaseURL:       xutil.FirstNonEmpty(file.TelegramBaseURL, envValue(lookupEnv, "TELEGRAM_BASE_URL"), defaultTelegramAPIURL),
 		codexConfigDir:        codexConfigDir,
 		interruptOnNewMessage: boolValue(file.InterruptOnNewMessage, true),
 		groups:                normalizeGroups(file.Groups, path, lookupEnv),
 	}
+	cfg.normalize()
 	if err := cfg.validate(); err != nil {
 		return config{}, err
 	}
@@ -145,7 +201,7 @@ func loadConfigFile(path string, lookupEnv func(string) (string, bool), readFile
 	}
 
 	candidates := []string{defaultConfigPath}
-	if home := firstNonEmpty(envValue(lookupEnv, "HOME"), envValue(lookupEnv, "USERPROFILE")); home != "" {
+	if home := xutil.FirstNonEmpty(envValue(lookupEnv, "HOME"), envValue(lookupEnv, "USERPROFILE")); home != "" {
 		candidates = append(candidates, filepath.Join(home, defaultUserConfigName))
 	}
 
@@ -191,14 +247,24 @@ func normalizeGroups(groups []groupConfig, configPath string, lookupEnv func(str
 	return out
 }
 
-func (c *config) validate() error {
-	c.dockerImage = strings.TrimSpace(c.dockerImage)
+func (c *config) normalize() {
 	c.platform = strings.ToLower(strings.TrimSpace(c.platform))
+	c.dockerImage = strings.TrimSpace(c.dockerImage)
+	c.larkAppID = strings.TrimSpace(c.larkAppID)
+	c.larkAppSecret = strings.TrimSpace(c.larkAppSecret)
+	c.larkVerificationToken = strings.TrimSpace(c.larkVerificationToken)
+	c.larkEncryptKey = strings.TrimSpace(c.larkEncryptKey)
+	c.larkBaseURL = strings.TrimSpace(c.larkBaseURL)
+	c.telegramBotToken = strings.TrimSpace(c.telegramBotToken)
+	c.telegramBaseURL = strings.TrimSpace(c.telegramBaseURL)
 	if c.platform == "" {
 		c.platform = defaultPlatform
 	}
+}
+
+func (c *config) validate() error {
 	switch c.platform {
-	case "lark":
+	case "lark", "feishu":
 		if c.larkAppID == "" {
 			return errors.New("required: lark_app_id or LARK_APP_ID")
 		}
@@ -273,16 +339,6 @@ func envValue(lookupEnv func(string) (string, bool), key string) string {
 	return strings.TrimSpace(value)
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 func boolValue(value *bool, fallback bool) bool {
 	if value == nil {
 		return fallback
@@ -344,7 +400,7 @@ func expandPathValue(value string, lookupEnv func(string) (string, bool)) string
 	if value == "" {
 		return ""
 	}
-	if home := firstNonEmpty(envValue(lookupEnv, "HOME"), envValue(lookupEnv, "USERPROFILE")); home != "" {
+	if home := xutil.FirstNonEmpty(envValue(lookupEnv, "HOME"), envValue(lookupEnv, "USERPROFILE")); home != "" {
 		switch {
 		case value == "~":
 			value = home

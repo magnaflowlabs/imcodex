@@ -136,6 +136,50 @@ func TestClientRedactsTokenFromErrors(t *testing.T) {
 	}
 }
 
+func TestClientRedactsTokenFromFileDownloadErrors(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("123:abc", "https://example.invalid")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getFile"):
+			return jsonResponse(r, `{"ok":true,"result":{"file_path":"photos/test.jpg"}}`), nil
+		case strings.Contains(r.URL.Path, "/file/bot123:abc/photos/test.jpg"):
+			return nil, io.ErrUnexpectedEOF
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+
+	_, err := client.DownloadMessageResource(context.Background(), "", "image", "file_123")
+	if err == nil {
+		t.Fatal("DownloadMessageResource() error = nil, want transport failure")
+	}
+	if strings.Contains(err.Error(), "123:abc") {
+		t.Fatalf("error leaked bot token: %v", err)
+	}
+	if !strings.Contains(err.Error(), redactedToken) {
+		t.Fatalf("error = %v, want redacted token marker", err)
+	}
+}
+
+func TestClientRedactsTokenFromBuildRequestErrors(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("123:abc", "://bad-url")
+	err := client.SendTextToChat(context.Background(), "-1001", "hello")
+	if err == nil {
+		t.Fatal("SendTextToChat() error = nil, want request build failure")
+	}
+	if strings.Contains(err.Error(), "123:abc") {
+		t.Fatalf("error leaked bot token: %v", err)
+	}
+	if !strings.Contains(err.Error(), redactedToken) {
+		t.Fatalf("error = %v, want redacted token marker", err)
+	}
+}
+
 func TestClientThrottlesAPICalls(t *testing.T) {
 	t.Parallel()
 

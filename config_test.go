@@ -41,6 +41,65 @@ groups:
 	}
 }
 
+func TestParseConfigAllowsFeishuAndLarkVerificationFields(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseConfig(nil, envLookup(map[string]string{
+		"LARK_APP_ID":     "cli_env",
+		"LARK_APP_SECRET": "secret_env",
+	}), readConfig(`
+platform: feishu
+lark_verification_token: verify_me
+lark_encrypt_key: encrypt_me
+groups:
+  - group_id: oc_1
+    cwd: /srv/demo
+`))
+	if err != nil {
+		t.Fatalf("parseConfig() error = %v", err)
+	}
+
+	if got, want := cfg.platform, "feishu"; got != want {
+		t.Fatalf("platform = %q, want %q", got, want)
+	}
+	if got, want := cfg.larkVerificationToken, "verify_me"; got != want {
+		t.Fatalf("larkVerificationToken = %q, want %q", got, want)
+	}
+	if got, want := cfg.larkEncryptKey, "encrypt_me"; got != want {
+		t.Fatalf("larkEncryptKey = %q, want %q", got, want)
+	}
+}
+
+func TestConfigStringRedactsSensitiveFields(t *testing.T) {
+	t.Parallel()
+
+	cfg := config{
+		path:                  "/srv/imcodex/config.yaml",
+		platform:              "telegram",
+		runtime:               "docker-codex",
+		larkAppID:             "app-id",
+		larkAppSecret:         "app-secret",
+		larkVerificationToken: "verify-token",
+		larkEncryptKey:        "encrypt-key",
+		telegramBotToken:      "123:abc",
+		telegramBaseURL:       "https://api.telegram.org",
+		groups: []groupConfig{{
+			GroupID: "oc_1",
+			CWD:     "/srv/demo",
+		}},
+	}
+
+	text := cfg.String()
+	for _, secret := range []string{"app-id", "app-secret", "verify-token", "encrypt-key", "123:abc"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("String() leaked secret %q: %s", secret, text)
+		}
+	}
+	if !strings.Contains(text, redactedConfigValue) {
+		t.Fatalf("String() = %q, want redacted marker", text)
+	}
+}
+
 func TestParseConfigReadsJobsAndResolvesPromptFile(t *testing.T) {
 	t.Parallel()
 

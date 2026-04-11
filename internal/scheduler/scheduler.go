@@ -174,7 +174,7 @@ func (j *jobRunner) tryRun(ctx context.Context) {
 		j.logger.Error("scheduled job failed", "job", j.job.Name, "group_id", j.job.GroupID, "session", j.job.SessionName, "err", err)
 		var reported reportedError
 		if !errors.As(err, &reported) {
-			j.sendBestEffort(fmt.Sprintf("[job:%s] failed: %v", j.job.Name, err))
+			j.sendBestEffort(ctx, fmt.Sprintf("[job:%s] failed: %v", j.job.Name, err))
 		}
 	}
 }
@@ -247,10 +247,10 @@ func (j *jobRunner) runPrompt(ctx context.Context) error {
 				continue
 			}
 			if latest == "" {
-				j.sendBestEffort(fmt.Sprintf("[job:%s] completed with no visible output.", j.job.Name))
+				j.sendBestEffort(ctx, fmt.Sprintf("[job:%s] completed with no visible output.", j.job.Name))
 				return nil
 			}
-			j.sendChunked(fmt.Sprintf("[job:%s]\n%s", j.job.Name, latest))
+			j.sendChunked(ctx, fmt.Sprintf("[job:%s]\n%s", j.job.Name, latest))
 			return nil
 		}
 	}
@@ -276,18 +276,18 @@ func (j *jobRunner) runCommand(ctx context.Context) error {
 		if tail := trimOutputTail(combined, 20); tail != "" {
 			message += "\nlast output:\n" + tail
 		}
-		j.sendChunked(message)
+		j.sendChunked(ctx, message)
 		return reportedError{err: fmt.Errorf("command job %s: %w", j.job.Name, err)}
 	}
 
 	summary := readTrimmedFile(runFiles.SummaryFile)
 	switch {
 	case summary != "":
-		j.sendChunked(fmt.Sprintf("[job:%s] completed.\nartifacts: %s\n%s", j.job.Name, runFiles.ArtifactsDir, summary))
+		j.sendChunked(ctx, fmt.Sprintf("[job:%s] completed.\nartifacts: %s\n%s", j.job.Name, runFiles.ArtifactsDir, summary))
 	case strings.TrimSpace(combined) != "":
-		j.sendChunked(fmt.Sprintf("[job:%s] completed.\nartifacts: %s\noutput:\n%s", j.job.Name, runFiles.ArtifactsDir, trimOutputTail(combined, 20)))
+		j.sendChunked(ctx, fmt.Sprintf("[job:%s] completed.\nartifacts: %s\noutput:\n%s", j.job.Name, runFiles.ArtifactsDir, trimOutputTail(combined, 20)))
 	default:
-		j.sendBestEffort(fmt.Sprintf("[job:%s] completed.\nartifacts: %s", j.job.Name, runFiles.ArtifactsDir))
+		j.sendBestEffort(ctx, fmt.Sprintf("[job:%s] completed.\nartifacts: %s", j.job.Name, runFiles.ArtifactsDir))
 	}
 	return nil
 }
@@ -295,7 +295,7 @@ func (j *jobRunner) runCommand(ctx context.Context) error {
 func (j *jobRunner) prepareCommandRunFiles() (commandRunFiles, error) {
 	baseDir := strings.TrimSpace(j.job.ArtifactsDir)
 	if baseDir == "" {
-		baseDir = filepath.Join(j.job.CWD, ".imcodex", "jobs", sanitizeName(j.job.Name))
+		baseDir = filepath.Join(j.job.CWD, ".imcodex", "jobs", tmuxctl.SanitizeName(j.job.Name))
 	}
 
 	runID := time.Now().UTC().Format("20060102T150405.000000000Z")
@@ -310,6 +310,9 @@ func (j *jobRunner) prepareCommandRunFiles() (commandRunFiles, error) {
 	}
 	if err := os.MkdirAll(filepath.Dir(summaryFile), 0o755); err != nil {
 		return commandRunFiles{}, fmt.Errorf("create summary dir %s: %w", filepath.Dir(summaryFile), err)
+	}
+	if err := os.WriteFile(summaryFile, nil, 0o644); err != nil {
+		return commandRunFiles{}, fmt.Errorf("reset summary file %s: %w", summaryFile, err)
 	}
 
 	return commandRunFiles{
@@ -403,44 +406,29 @@ func validateJob(job Job) error {
 }
 
 func DefaultSessionName(groupID string, cwd string, jobName string) string {
-	return "imcodex-job-" + sanitizeName(filepath.Base(strings.TrimSpace(cwd))) + "-" + sanitizeName(groupID) + "-" + sanitizeName(jobName)
+	return "imcodex-job-" + tmuxctl.SanitizeName(filepath.Base(strings.TrimSpace(cwd))) + "-" + tmuxctl.SanitizeName(groupID) + "-" + tmuxctl.SanitizeName(jobName)
 }
 
-func sanitizeName(in string) string {
-	var b strings.Builder
-	for _, r := range in {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r + ('a' - 'A'))
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		return "session"
-	}
-	return out
-}
-
-func (j *jobRunner) sendChunked(text string) {
+func (j *jobRunner) sendChunked(ctx context.Context, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
 	for _, chunk := range splitByRunes(text, maxMessageRunes) {
-		j.sendBestEffort(chunk)
+		j.sendBestEffort(ctx, chunk)
 	}
 }
 
-func (j *jobRunner) sendBestEffort(text string) {
+func (j *jobRunner) sendBestEffort(ctx context.Context, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	if err := j.messenger.SendTextToChat(context.Background(), j.job.GroupID, text); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	if err := j.messenger.SendTextToChat(ctx, j.job.GroupID, text); err != nil {
 		j.logger.Error("send scheduled job message failed", "job", j.job.Name, "group_id", j.job.GroupID, "err", err)
 	}
 }

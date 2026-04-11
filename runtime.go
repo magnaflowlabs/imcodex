@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/magnaflowlabs/imcodex/internal/tmuxctl"
+	"github.com/magnaflowlabs/imcodex/internal/xutil"
 )
 
 const (
@@ -69,7 +72,7 @@ func resolveDockerCodexConfigDir(value string, lookupEnv func(string) (string, b
 	if strings.TrimSpace(value) != "" {
 		return resolveCLIPath(value, lookupEnv)
 	}
-	home := firstNonEmpty(envValue(lookupEnv, "HOME"), envValue(lookupEnv, "USERPROFILE"))
+	home := xutil.FirstNonEmpty(envValue(lookupEnv, "HOME"), envValue(lookupEnv, "USERPROFILE"))
 	if home == "" {
 		return "", errors.New("docker-codex requires HOME or --codex-config-dir")
 	}
@@ -264,26 +267,9 @@ func dockerCodexEntrypointScript() string {
 }
 
 func dockerContainerName(session string, workspace string) string {
-	containerName := "imcodex-" + sanitizeRuntimeToken(firstNonEmpty(session, workspace))
+	containerName := "imcodex-" + tmuxctl.SanitizeName(xutil.FirstNonEmpty(session, workspace))
 	if containerName == "imcodex-" {
 		return "imcodex-agent"
 	}
 	return strings.Trim(containerName, "-")
-}
-
-func sanitizeRuntimeToken(in string) string {
-	var b strings.Builder
-	for _, r := range in {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r + ('a' - 'A'))
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	return strings.Trim(b.String(), "-")
 }

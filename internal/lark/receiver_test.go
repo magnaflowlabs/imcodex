@@ -265,7 +265,7 @@ func TestEventToIncomingMessageRejectsBadTextPayload(t *testing.T) {
 func TestEventDispatcherIgnoresBotP2PEntered(t *testing.T) {
 	t.Parallel()
 
-	dispatcher := newEventDispatcher(fakeMessageHandler{})
+	dispatcher := newEventDispatcher(fakeMessageHandler{}, "", "")
 	_, err := dispatcher.Do(context.Background(), []byte(`{
 		"schema":"2.0",
 		"header":{"event_type":"im.chat.access_event.bot_p2p_chat_entered_v1"},
