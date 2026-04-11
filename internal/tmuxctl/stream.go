@@ -3,6 +3,7 @@ package tmuxctl
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
@@ -200,7 +201,19 @@ func looksLikeWorkingChromeLine(line string) bool {
 	if !strings.Contains(lower, "esc to interrupt") {
 		return false
 	}
-	return strings.HasPrefix(lower, "• working") || strings.HasPrefix(lower, "working (")
+	lower = trimLeadingStatusGlyphs(lower)
+	return strings.HasPrefix(lower, "working (")
+}
+
+func trimLeadingStatusGlyphs(line string) string {
+	return strings.TrimLeftFunc(line, func(r rune) bool {
+		switch r {
+		case '•', '◦', '●', '○', '·', '-', '*':
+			return true
+		default:
+			return unicode.IsSpace(r)
+		}
+	})
 }
 
 func looksLikeModelStatusLine(line string) bool {
@@ -248,13 +261,26 @@ func lastPromptLineIndex(lines []string) int {
 }
 
 func suffixPrefixOverlap(prev string, curr string) int {
-	limit := min(len(prev), len(curr))
-	for size := limit; size > 0; size-- {
-		if prev[len(prev)-size:] == curr[:size] {
-			return size
-		}
+	if prev == "" || curr == "" {
+		return 0
 	}
-	return 0
+	combined := curr + "\x00" + prev
+	pi := make([]int, len(combined))
+	for i := 1; i < len(combined); i++ {
+		j := pi[i-1]
+		for j > 0 && combined[i] != combined[j] {
+			j = pi[j-1]
+		}
+		if combined[i] == combined[j] {
+			j++
+		}
+		pi[i] = j
+	}
+	overlap := pi[len(pi)-1]
+	if overlap > len(curr) {
+		return len(curr)
+	}
+	return overlap
 }
 
 func equalLines(a []string, b []string) bool {
@@ -267,11 +293,4 @@ func equalLines(a []string, b []string) bool {
 		}
 	}
 	return true
-}
-
-func min(a int, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

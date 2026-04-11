@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -36,6 +38,7 @@ func acquireProcessLock(configPath string) (func(), error) {
 	release := func() {
 		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 		_ = file.Close()
+		_ = os.Remove(lockPath)
 	}
 	return release, nil
 }

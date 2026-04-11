@@ -338,9 +338,43 @@ func newTestClient() *Client {
 	client := New()
 	client.enterWait = 0
 	client.launchCommand = func(SessionSpec) string {
-		return "exec cat"
+		return "sh -lc 'printf \"›\\n\"; exec cat'"
 	}
 	return client
+}
+
+func TestClientEnsureSessionWaitsForPromptForHostRuntime(t *testing.T) {
+	t.Parallel()
+
+	requireTmux(t)
+
+	ctx := context.Background()
+	client := New()
+	client.enterWait = 0
+	client.launchCommand = func(SessionSpec) string {
+		return "sh -lc 'sleep 0.25; printf \"›\\n\"; exec cat'"
+	}
+	spec := SessionSpec{
+		SessionName: fmt.Sprintf("imcodex-test-%d", time.Now().UnixNano()),
+		CWD:         t.TempDir(),
+		StartupWait: 10 * time.Millisecond,
+	}
+
+	startedAt := time.Now()
+	created, err := client.EnsureSession(ctx, spec)
+	if err != nil {
+		t.Fatalf("EnsureSession() error = %v", err)
+	}
+	if !created {
+		t.Fatal("created = false, want true")
+	}
+	t.Cleanup(func() {
+		_ = client.run(ctx, "kill-session", "-t", spec.SessionName)
+	})
+
+	if elapsed := time.Since(startedAt); elapsed < 200*time.Millisecond {
+		t.Fatalf("EnsureSession() elapsed = %s, want wait for prompt before returning", elapsed)
+	}
 }
 
 func requireTmux(t *testing.T) {

@@ -183,7 +183,7 @@ func (c *Client) DownloadMessageResource(ctx context.Context, _ string, _ string
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
-		return gateway.DownloadedResource{}, fmt.Errorf("build telegram file request: %w", err)
+		return gateway.DownloadedResource{}, fmt.Errorf("build telegram file request: %s", c.redact(err.Error()))
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -241,7 +241,7 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bot"+c.botToken+"/"+method, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build telegram request: %w", err)
+		return fmt.Errorf("build telegram request: %s", c.redact(err.Error()))
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
@@ -287,6 +287,8 @@ func (c *Client) redact(text string) string {
 	if token == "" {
 		return text
 	}
+	text = strings.ReplaceAll(text, "/file/bot"+token+"/", "/file/bot"+redactedToken+"/")
+	text = strings.ReplaceAll(text, "/bot"+token+"/", "/bot"+redactedToken+"/")
 	return strings.ReplaceAll(text, token, redactedToken)
 }
 
@@ -295,22 +297,24 @@ func (c *Client) waitForThrottle(ctx context.Context) error {
 		return nil
 	}
 	c.throttleMu.Lock()
-	defer c.throttleMu.Unlock()
 
 	now := time.Now()
 	next := c.lastRequestAt.Add(c.throttleEvery)
 	if c.lastRequestAt.IsZero() || !next.After(now) {
 		c.lastRequestAt = now
+		c.throttleMu.Unlock()
 		return nil
 	}
+	wait := next.Sub(now)
+	c.lastRequestAt = next
+	c.throttleMu.Unlock()
 
-	timer := time.NewTimer(next.Sub(now))
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
-		c.lastRequestAt = time.Now()
 		return nil
 	}
 }

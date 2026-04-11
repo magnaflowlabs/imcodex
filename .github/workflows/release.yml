@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to build and upload"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve tag
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ -z "${tag}" || "${tag}" != v* ]]; then
+            echo "release tag must start with v" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.vars.outputs.tag }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^const appVersion = "\(.*\)"$/\1/p' version.go)"
+          expected_tag="v${version}"
+          actual_tag="${{ steps.vars.outputs.tag }}"
+          if [[ -z "${version}" ]]; then
+            echo "failed to read appVersion from version.go" >&2
+            exit 1
+          fi
+          if [[ "${expected_tag}" != "${actual_tag}" ]]; then
+            echo "tag ${actual_tag} does not match version.go (${expected_tag})" >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        shell: bash
+        run: make test
+
+      - name: Build release assets
+        shell: bash
+        run: IMCODEX_SKIP_TESTS=1 ./tools/release/build-assets.sh
+
+      - name: Build runtime image for scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex_version="$(sed -n 's/^ARG CODEX_VERSION=//p' tools/runtime/Dockerfile.codex)"
+          if [[ -z "${codex_version}" ]]; then
+            echo "failed to determine CODEX_VERSION from Dockerfile.codex" >&2
+            exit 1
+          fi
+          docker build \
+            --build-arg CODEX_VERSION="${codex_version}" \
+            --build-arg IMCODEX_IMAGE_REVISION=ci \
+            -t imcodex-codex:scan \
+            -f tools/runtime/Dockerfile.codex \
+            .
+
+      - name: Scan runtime image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: imcodex-codex:scan
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.vars.outputs.tag }}"
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --title "${tag}" --generate-notes
+          fi
+          gh release upload "${tag}" build/release/* --clobber

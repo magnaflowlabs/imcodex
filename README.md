@@ -70,6 +70,14 @@ tmux -V
 go build -o imcodex .
 ```
 
+To build the GitHub release artifacts locally:
+
+```bash
+make release
+```
+
+That writes versioned tarballs plus a checksum file to `build/release/`.
+
 ## Configuration
 
 If `-config` is omitted, `imcodex` looks for config files in this order:
@@ -158,14 +166,14 @@ When `imcodex` runs in `docker-codex` mode:
 codex -a never -s danger-full-access --no-alt-screen -C /workspace
 ```
 
-The pinned Docker Codex CLI version for `v2.2.3` is `0.118.0`.
+The pinned Docker Codex CLI version for `v2.2.4` is `0.118.0`.
 
 If you want to prebuild the same image manually:
 
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.118.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.3 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.4 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -202,13 +210,17 @@ and `tmux` session reuse continue to work the same way.
 
 ## Message Delivery
 
-`v2.2.3` keeps host runtime as the default and further hardens Telegram delivery
+`v2.2.4` keeps host runtime as the default and further hardens Telegram delivery
 behavior without changing the public config
 surface:
 
 - outbound send/edit/delete/chat-action calls now use bounded request timeouts
-- detached reply chunks resume one at a time with per-chat spacing instead of
-  draining the whole backlog at once
+- tmux output capture now polls at 100ms by default while visible body sync and
+  detached plain sends are paced independently at 1-second defaults
+- detached reply chunks resume in order with a 1-second per-chat spacing and
+  larger plain-message batches to reduce post-run backlog lag
+- host runtime now waits for an actual Codex prompt before the first input is
+  pasted into a tmux session
 - severe editable `429` responses fall back to detached delivery instead of
   retrying the same editable body indefinitely
 - editable reply sync no longer bypasses the normal edit throttle on every
@@ -237,5 +249,5 @@ More detailed runtime notes:
 ## Example Startup Log
 
 ```text
-imcodex 2.2.3 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
+imcodex 2.2.4 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
 ```

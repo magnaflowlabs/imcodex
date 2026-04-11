@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/magnaflowlabs/imcodex/internal/gateway"
+	"github.com/magnaflowlabs/imcodex/internal/xutil"
 )
 
 const pollTimeoutSeconds = 8
@@ -29,12 +30,17 @@ type Receiver struct {
 	offset   int64
 	mu       sync.Mutex
 	pollStop context.CancelFunc
-	workers  map[string]chan queuedUpdate
 }
 
 type queuedUpdate struct {
-	update Update
-	done   chan error
+	updateID int64
+	msg      gateway.IncomingMessage
+	done     chan error
+}
+
+type batchResult struct {
+	updateID int64
+	done     chan error
 }
 
 func NewReceiver(client UpdateClient, handler MessageHandler, logger *slog.Logger) *Receiver {
@@ -45,7 +51,6 @@ func NewReceiver(client UpdateClient, handler MessageHandler, logger *slog.Logge
 		client:  client,
 		handler: handler,
 		logger:  logger,
-		workers: make(map[string]chan queuedUpdate),
 	}
 }
 
@@ -96,87 +101,87 @@ func (r *Receiver) processBatch(ctx context.Context, updates []Update) error {
 		return nil
 	}
 
-	done := make(chan error, len(updates))
-	nextOffset := r.offset
-	dispatched := 0
+	grouped := make(map[string][]queuedUpdate)
+	ordered := make([]batchResult, 0, len(updates))
+	keys := make([]string, 0, len(updates))
 	for _, update := range updates {
-		if update.UpdateID >= nextOffset {
-			nextOffset = update.UpdateID + 1
+		result := batchResult{
+			updateID: update.UpdateID,
+			done:     make(chan error, 1),
 		}
-		if err := r.dispatchUpdate(ctx, update, done); err != nil {
-			return err
+		ordered = append(ordered, result)
+		msg, ok, err := updateToIncomingMessage(update)
+		if err != nil {
+			r.logger.Warn("telegram update decode failed", "update_id", update.UpdateID, "err", err)
+			result.done <- nil
+			close(result.done)
+			continue
 		}
-		dispatched++
+		if !ok {
+			result.done <- nil
+			close(result.done)
+			continue
+		}
+		key := msg.GroupID
+		if _, exists := grouped[key]; !exists {
+			keys = append(keys, key)
+		}
+		grouped[key] = append(grouped[key], queuedUpdate{
+			updateID: update.UpdateID,
+			msg:      msg,
+			done:     result.done,
+		})
 	}
 
-	for i := 0; i < dispatched; i++ {
-		if err := <-done; err != nil {
-			return err
+	for _, key := range keys {
+		items := grouped[key]
+		go func(batch []queuedUpdate) {
+			for _, item := range batch {
+				err := r.handleMessage(ctx, item.updateID, item.msg)
+				item.done <- err
+				close(item.done)
+				if err != nil {
+					return
+				}
+			}
+		}(items)
+	}
+
+	for _, item := range ordered {
+		select {
+		case err := <-item.done:
+			if err != nil {
+				return err
+			}
+			if item.updateID >= r.offset {
+				r.offset = item.updateID + 1
+			}
+			continue
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-item.done:
+			if err != nil {
+				return err
+			}
+			if item.updateID >= r.offset {
+				r.offset = item.updateID + 1
+			}
 		}
 	}
-	r.offset = nextOffset
 	return nil
 }
 
-func (r *Receiver) dispatchUpdate(ctx context.Context, update Update, done chan error) error {
-	key := updateWorkerKey(update)
-	worker := r.workerForKey(ctx, key)
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case worker <- queuedUpdate{update: update, done: done}:
-		return nil
-	}
-}
-
-func (r *Receiver) workerForKey(ctx context.Context, key string) chan queuedUpdate {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if worker, ok := r.workers[key]; ok {
-		return worker
-	}
-
-	worker := make(chan queuedUpdate, 32)
-	r.workers[key] = worker
-	go r.runWorker(ctx, key, worker)
-	return worker
-}
-
-func (r *Receiver) runWorker(ctx context.Context, key string, worker chan queuedUpdate) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case item := <-worker:
-			item.done <- r.handleUpdate(ctx, item.update)
-		}
-	}
-}
-
-func (r *Receiver) handleUpdate(ctx context.Context, update Update) error {
-	msg, ok, err := updateToIncomingMessage(update)
-	if err != nil {
-		r.logger.Warn("telegram update decode failed", "update_id", update.UpdateID, "err", err)
-		return nil
-	}
-	if !ok {
-		return nil
-	}
+func (r *Receiver) handleMessage(ctx context.Context, updateID int64, msg gateway.IncomingMessage) error {
 	if err := r.handler.HandleMessage(ctx, msg); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		r.logger.Warn("telegram update handle failed", "update_id", update.UpdateID, "message_id", msg.MessageID, "group_id", msg.GroupID, "err", err)
+		r.logger.Warn("telegram update handle failed", "update_id", updateID, "message_id", msg.MessageID, "group_id", msg.GroupID, "err", err)
 	}
 	return nil
-}
-
-func updateWorkerKey(update Update) string {
-	if update.Message != nil {
-		return strconv.FormatInt(update.Message.Chat.ID, 10)
-	}
-	return "update:" + strconv.FormatInt(update.UpdateID, 10)
 }
 
 func (r *Receiver) setPollStop(cancel context.CancelFunc) {
@@ -216,7 +221,7 @@ func updateToIncomingMessage(update Update) (gateway.IncomingMessage, bool, erro
 	incoming := gateway.IncomingMessage{
 		MessageID: strconv.FormatInt(msg.MessageID, 10),
 		GroupID:   strconv.FormatInt(msg.Chat.ID, 10),
-		Text:      firstNonEmpty(msg.Text, msg.Caption),
+		Text:      xutil.FirstNonEmpty(msg.Text, msg.Caption),
 	}
 
 	if photo := selectLargestPhoto(msg.Photo); photo != nil {
@@ -284,13 +289,4 @@ func documentAttachment(doc *Document) *gateway.IncomingAttachment {
 		ResourceKey:  strings.TrimSpace(doc.FileID),
 		FileName:     strings.TrimSpace(doc.FileName),
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

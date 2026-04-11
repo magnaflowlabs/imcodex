@@ -262,6 +262,47 @@ func TestReceiverProcessesBatchByChatSerialOrder(t *testing.T) {
 	}
 }
 
+func TestReceiverSkipsUnsupportedUpdatesWithoutCallingHandler(t *testing.T) {
+	t.Parallel()
+
+	handler := &blockingHandler{}
+	receiver := NewReceiver(&fakeUpdateClient{}, handler, nil)
+
+	if err := receiver.processBatch(context.Background(), []Update{
+		{UpdateID: 1},
+		{UpdateID: 2, Message: &Message{MessageID: 2, Chat: Chat{ID: 123, Type: "private"}, Text: "ignore"}},
+	}); err != nil {
+		t.Fatalf("processBatch() error = %v", err)
+	}
+
+	if got := len(handler.allStarted()); got != 0 {
+		t.Fatalf("started = %#v, want skipped updates ignored", handler.allStarted())
+	}
+}
+
+func TestReceiverDoesNotKeepPerChatStateBetweenBatches(t *testing.T) {
+	t.Parallel()
+
+	handler := &blockingHandler{}
+	receiver := NewReceiver(&fakeUpdateClient{}, handler, nil)
+
+	if err := receiver.processBatch(context.Background(), []Update{
+		{UpdateID: 1, Message: &Message{MessageID: 1, Chat: Chat{ID: -1, Type: "group"}, Text: "hello"}},
+	}); err != nil {
+		t.Fatalf("processBatch() error = %v", err)
+	}
+	if err := receiver.processBatch(context.Background(), []Update{
+		{UpdateID: 2, Message: &Message{MessageID: 2, Chat: Chat{ID: -1, Type: "group"}, Text: "again"}},
+	}); err != nil {
+		t.Fatalf("second processBatch() error = %v", err)
+	}
+
+	started := handler.allStarted()
+	if len(started) != 2 || started[0] != "hello" || started[1] != "again" {
+		t.Fatalf("started = %#v, want both batches processed without retained worker state", started)
+	}
+}
+
 func TestReceiverAbortsLongPollOnShutdown(t *testing.T) {
 	t.Parallel()
 

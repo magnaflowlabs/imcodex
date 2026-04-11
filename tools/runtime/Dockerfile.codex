@@ -7,16 +7,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates git gosu ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex@${CODEX_VERSION}
-
 RUN useradd --create-home --shell /bin/bash agent
+ENV HOME=/home/agent
+ENV CODEX_HOME=/home/agent/.codex
+ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
+ENV PATH=/home/agent/.npm-global/bin:${PATH}
+ENV IMCODEX_CODEX_VERSION=${CODEX_VERSION}
+
+RUN mkdir -p "${NPM_CONFIG_PREFIX}" "${CODEX_HOME}" /workspace \
+    && chown -R agent:agent /home/agent /workspace
+
+RUN gosu agent npm install -g @openai/codex@${CODEX_VERSION}
+
 WORKDIR /workspace
 
 LABEL com.magnaflowlabs.imcodex.codex-version="${CODEX_VERSION}"
 LABEL com.magnaflowlabs.imcodex.image-revision="${IMCODEX_IMAGE_REVISION}"
-
-ENV HOME=/home/agent
-ENV CODEX_HOME=/home/agent/.codex
-ENV IMCODEX_CODEX_VERSION=${CODEX_VERSION}
 
 CMD ["bash", "-lc", "exec gosu agent codex -a never -s danger-full-access --no-alt-screen -C /workspace"]

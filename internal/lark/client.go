@@ -213,12 +213,12 @@ func (c *Client) post(ctx context.Context, path string, payload any) (*messageAP
 
 func (c *Client) tenantAccessToken(ctx context.Context) (string, error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.token != "" && time.Now().Before(c.tokenExpiry) {
 		token := c.token
-		c.mu.Unlock()
 		return token, nil
 	}
-	c.mu.Unlock()
 
 	body, err := json.Marshal(map[string]string{
 		"app_id":     c.appID,
@@ -253,10 +253,8 @@ func (c *Client) tenantAccessToken(ctx context.Context) (string, error) {
 		expireSeconds = out.Expire
 	}
 
-	c.mu.Lock()
 	c.token = out.TenantAccessToken
 	c.tokenExpiry = time.Now().Add(time.Duration(expireSeconds) * time.Second)
-	c.mu.Unlock()
 	return out.TenantAccessToken, nil
 }
 

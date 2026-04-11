@@ -119,6 +119,25 @@ func TestIsBusyFalseWhenPromptPresentWithoutWorkingChrome(t *testing.T) {
 	}
 }
 
+func TestNormalizeSnapshotDropsHollowBulletWorkingChrome(t *testing.T) {
+	t.Parallel()
+
+	raw := "◦ Working (1m 29s • esc to interrupt)\n\n◦ Working (1m 30s • esc to interrupt)\n\n• final answer"
+	got := NormalizeSnapshot(raw)
+	want := "• final answer"
+	if got != want {
+		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, want)
+	}
+}
+
+func TestIsBusyRecognizesHollowBulletWorkingChrome(t *testing.T) {
+	t.Parallel()
+
+	if !IsBusy("◦ Working (28s • esc to interrupt)\n\n› explain") {
+		t.Fatal("IsBusy() = false, want true for hollow-bullet working chrome")
+	}
+}
+
 func TestNormalizeSnapshotKeepsModelLikeContentLines(t *testing.T) {
 	t.Parallel()
 

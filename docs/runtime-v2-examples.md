@@ -47,7 +47,7 @@ rebuilding the managed local `imcodex-codex:stable` image.
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.118.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.3 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.4 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -72,7 +72,7 @@ groups:
 ## Notes
 
 - YAML no longer contains `runtime`, `runtime_config_dir`, or `session_command`.
-- `host-codex` is the default runtime in `v2.2.3`.
+- `host-codex` is the default runtime in `v2.2.4`.
 - `docker-codex` only activates when you pass `--runtime docker-codex`.
 - `docker_image` is optional and only affects `docker-codex`.
 - `~/...`, `$HOME/...`, and `${HOME}/...` work in path fields.

@@ -13,11 +13,11 @@ BUILD_DIR := build
 LOCAL_BIN := $(BUILD_DIR)/$(APP)-$(LOCAL_GOOS)-$(LOCAL_GOARCH)
 LINUX_BIN := $(BUILD_DIR)/$(APP)-$(LINUX_GOOS)-$(LINUX_GOARCH)
 
-.PHONY: all linux clean test build-local build-linux check-go check-upx
+.PHONY: all linux clean test release build-local build-linux check-go check-upx
 
 all: check-go build-local
 
-linux: check-go check-upx build-linux
+linux: check-go build-linux
 
 check-go:
 	@command -v $(GO) >/dev/null 2>&1 || { echo "$(GO) not found"; exit 1; }
@@ -41,11 +41,18 @@ endif
 build-linux:
 	mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=0 GOOS=$(LINUX_GOOS) GOARCH=$(LINUX_GOARCH) $(GO) build -o $(LINUX_BIN) .
+ifeq ($(HAVE_UPX),yes)
 	$(UPX) -q $(LINUX_BIN)
+else
+	@echo "skip upx for linux build: $(UPX) not found"
+endif
 
 test:
 	$(GO) test ./...
 	$(GO) test -race ./...
+
+release: check-go
+	./tools/release/build-assets.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

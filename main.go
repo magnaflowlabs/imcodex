@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"github.com/magnaflowlabs/imcodex/internal/scheduler"
 	"github.com/magnaflowlabs/imcodex/internal/telegram"
 	"github.com/magnaflowlabs/imcodex/internal/tmuxctl"
+	"github.com/magnaflowlabs/imcodex/internal/xutil"
 )
 
 func main() {
@@ -48,7 +50,7 @@ func main() {
 			GroupID:               group.GroupID,
 			CWD:                   group.CWD,
 			VisibleCWD:            visibleCWDForRuntime(cfg.runtime, group.CWD),
-			SessionName:           firstNonEmpty(group.SessionName, gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD)),
+			SessionName:           xutil.FirstNonEmpty(group.SessionName, gateway.DefaultSessionNameForGroup(group.GroupID, group.CWD)),
 			LaunchCommand:         launchCommand,
 			InterruptOnNewMessage: cfg.interruptOnNewMessage,
 		})
@@ -110,7 +112,7 @@ func buildRouter(ctx context.Context, cfg config, launchCommand string, options 
 		*baseURL = cfg.telegramBaseURL
 		*startFuncs = append(*startFuncs, receiver.Start)
 		return router, nil
-	default:
+	case "lark", "feishu":
 		groupIDs := make([]string, 0, len(cfg.groups))
 		for _, group := range cfg.groups {
 			groupIDs = append(groupIDs, group.GroupID)
@@ -125,7 +127,7 @@ func buildRouter(ctx context.Context, cfg config, launchCommand string, options 
 		} else if runner != nil {
 			*startFuncs = append(*startFuncs, runner.Start)
 		}
-		receiver := lark.NewReceiver(cfg.larkAppID, cfg.larkAppSecret, cfg.larkBaseURL, router)
+		receiver := lark.NewReceiver(cfg.larkAppID, cfg.larkAppSecret, cfg.larkBaseURL, cfg.larkVerificationToken, cfg.larkEncryptKey, router)
 		poller := lark.NewPoller(larkClient, groupIDs, router, nil)
 		*baseURL = cfg.larkBaseURL
 		*startFuncs = append(*startFuncs,
@@ -133,6 +135,8 @@ func buildRouter(ctx context.Context, cfg config, launchCommand string, options 
 			poller.Start,
 		)
 		return router, nil
+	default:
+		return nil, fmt.Errorf("unsupported platform: %s", cfg.platform)
 	}
 }
 
@@ -157,7 +161,7 @@ func buildScheduledJobs(cfg config, launchCommand string) []scheduler.Job {
 				Command:       job.Command,
 				ArtifactsDir:  job.ArtifactsDir,
 				SummaryFile:   job.SummaryFile,
-				SessionName:   firstNonEmpty(job.SessionName, scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name)),
+				SessionName:   xutil.FirstNonEmpty(job.SessionName, scheduler.DefaultSessionName(group.GroupID, group.CWD, job.Name)),
 				LaunchCommand: launchCommand,
 			})
 		}
