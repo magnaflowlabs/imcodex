@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/magnaflowlabs/imcodex/internal/codexcmd"
 )
 
 func TestResolveLaunchCommandBuildsInternalDockerCommand(t *testing.T) {
@@ -107,7 +109,8 @@ func TestDockerCodexEntrypointScriptCopiesConfigAndDropsPrivileges(t *testing.T)
 	for _, want := range []string{
 		"cp -a /config-ro/.",
 		"chown -R 'agent:agent' '/home/agent'",
-		"exec gosu 'agent' codex -a never -s danger-full-access --no-alt-screen -C '/workspace'",
+		`exec gosu 'agent' bash -lc `,
+		shellQuote(codexcmd.LaunchCommand(dockerWorkspaceDir)),
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("entrypoint = %q, want substring %q", script, want)

@@ -229,7 +229,10 @@ func looksLikeModelStatusLine(line string) bool {
 		strings.Contains(lower, "codex") ||
 		strings.Contains(lower, "o1") ||
 		strings.Contains(lower, "o3") ||
-		strings.Contains(lower, "o4")
+		strings.Contains(lower, "o4") ||
+		strings.Contains(lower, "claude") ||
+		strings.Contains(lower, "gemini") ||
+		strings.Contains(lower, "mistral")
 }
 
 func isTrailingBusyChrome(line string) bool {
@@ -260,7 +263,9 @@ func lastPromptLineIndex(lines []string) int {
 	return -1
 }
 
-func suffixPrefixOverlap(prev string, curr string) int {
+// SuffixPrefixOverlap returns the length of the longest suffix of prev that
+// is also a prefix of curr, using the KMP failure-function (O(n) time).
+func SuffixPrefixOverlap(prev string, curr string) int {
 	if prev == "" || curr == "" {
 		return 0
 	}
@@ -281,6 +286,12 @@ func suffixPrefixOverlap(prev string, curr string) int {
 		return len(curr)
 	}
 	return overlap
+}
+
+// suffixPrefixOverlap is a package-internal alias kept for call sites within
+// this file that were written before the function was exported.
+func suffixPrefixOverlap(prev string, curr string) int {
+	return SuffixPrefixOverlap(prev, curr)
 }
 
 func equalLines(a []string, b []string) bool {

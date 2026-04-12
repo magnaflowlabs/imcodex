@@ -7,15 +7,27 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/magnaflowlabs/imcodex/internal/codexcmd"
 )
 
 const (
-	controlPaneOption = "@imcodex-control-pane"
-	controlPaneRole   = "@imcodex-pane-role"
-	controlWindowName = "imcodex"
-	readyPollEvery    = 250 * time.Millisecond
-	hostReadyWait     = 30 * time.Second
-	dockerReadyWait   = 2 * time.Minute
+	// CaptureFullHistory removes the line-count limit on tmux capture-pane,
+	// fetching the entire scrollback buffer. Use only when a complete history
+	// is required (e.g. session teardown / recovery). For routine polling use
+	// the Service.history field instead.
+	CaptureFullHistory = -1
+	// CaptureRecoveryHistory is the maximum number of scrollback lines fetched
+	// when recovering an existing session. It is large enough to capture a
+	// typical Codex session's full output while avoiding unbounded memory
+	// allocation on long-running sessions.
+	CaptureRecoveryHistory = 5000
+	controlPaneOption      = "@imcodex-control-pane"
+	controlPaneRole    = "@imcodex-pane-role"
+	controlWindowName  = "imcodex"
+	readyPollEvery     = 250 * time.Millisecond
+	hostReadyWait      = 30 * time.Second
+	dockerReadyWait    = 2 * time.Minute
 )
 
 type SessionSpec struct {
@@ -162,15 +174,21 @@ func (c *Client) writeBufferFile(text string) (string, error) {
 }
 
 func (c *Client) Capture(ctx context.Context, session string, history int) (string, error) {
-	if history <= 0 {
-		history = 200
+	start := ""
+	if history < 0 {
+		start = "-"
+	} else {
+		if history <= 0 {
+			history = 200
+		}
+		start = fmt.Sprintf("-%d", history)
 	}
 	target, err := c.controlPaneTarget(ctx, session)
 	if err != nil {
 		return "", err
 	}
 
-	out, err := c.output(ctx, "capture-pane", "-pJ", "-S", fmt.Sprintf("-%d", history), "-t", target)
+	out, err := c.output(ctx, "capture-pane", "-pJ", "-S", start, "-t", target)
 	if err != nil {
 		return "", fmt.Errorf("capture tmux pane: %w", err)
 	}
@@ -404,13 +422,7 @@ func (c *Client) command(spec SessionSpec) string {
 }
 
 func defaultLaunchCommand(spec SessionSpec) string {
-	return "exec " + shellJoin(
-		"codex",
-		"-a", "never",
-		"-s", "danger-full-access",
-		"--no-alt-screen",
-		"-C", spec.CWD,
-	)
+	return codexcmd.LaunchCommand(spec.CWD)
 }
 
 func expandLaunchCommandTemplate(template string, spec SessionSpec) string {
@@ -423,17 +435,5 @@ func expandLaunchCommandTemplate(template string, spec SessionSpec) string {
 	return replacer.Replace(strings.TrimSpace(template))
 }
 
-func shellJoin(args ...string) string {
-	out := make([]string, 0, len(args))
-	for _, arg := range args {
-		out = append(out, shellQuote(arg))
-	}
-	return strings.Join(out, " ")
-}
-
-func shellQuote(in string) string {
-	if in == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(in, "'", `'\''`) + "'"
-}
+func shellJoin(args ...string) string { return codexcmd.ShellJoin(args...) }
+func shellQuote(in string) string     { return codexcmd.ShellQuote(in) }

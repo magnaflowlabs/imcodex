@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/magnaflowlabs/imcodex/internal/codexcmd"
 	"github.com/magnaflowlabs/imcodex/internal/tmuxctl"
 	"github.com/magnaflowlabs/imcodex/internal/xutil"
 )
@@ -263,7 +264,7 @@ func dockerCodexEntrypointScript() string {
 		"mkdir -p " + shellQuote(configHome) + "; " +
 		"if [[ -d /config-ro ]]; then cp -a /config-ro/. " + shellQuote(configHome) + "/; fi; " +
 		"chown -R " + shellQuote(dockerAgentUser+":"+dockerAgentUser) + " " + shellQuote(dockerAgentHome) + "; " +
-		"exec gosu " + shellQuote(dockerAgentUser) + " codex -a never -s danger-full-access --no-alt-screen -C " + shellQuote(dockerWorkspaceDir)
+		"exec gosu " + shellQuote(dockerAgentUser) + " bash -lc " + shellQuote(codexcmd.LaunchCommand(dockerWorkspaceDir))
 }
 
 func dockerContainerName(session string, workspace string) string {
