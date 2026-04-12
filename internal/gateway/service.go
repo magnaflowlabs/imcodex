@@ -437,7 +437,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		return err
 	}
 
-	snapshot, err := s.console.Capture(s.ctx, rt.session, tmuxctl.CaptureFullHistory)
+	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
 	if err != nil {
 		return err
 	}
@@ -653,7 +653,7 @@ func (s *Service) refreshDispatchBaseline(rt *groupRuntime) string {
 	if rt == nil || strings.TrimSpace(rt.session) == "" {
 		return ""
 	}
-	snapshot, err := s.console.Capture(s.ctx, rt.session, tmuxctl.CaptureFullHistory)
+	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
 	if err != nil {
 		s.logger.Warn("capture dispatch baseline failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
 		return rt.lastText

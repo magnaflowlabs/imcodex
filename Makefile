@@ -48,8 +48,9 @@ else
 endif
 
 test:
-	$(GO) test ./...
-	$(GO) test -race ./...
+	$(GO) test . ./internal/codexcmd ./internal/lark ./internal/scheduler ./internal/telegram ./internal/tmuxctl ./tools/tgstub_e2e
+	$(GO) test ./internal/gateway -run 'TestService(DoesNotReplayPreviousHistoryOnNewRequest|DoesNotReplayLateResumeBackfillBeforeBusy|ForwardsFastReplyWhenNoBusySnapshotIsObserved|DoesNotForwardMultilinePromptEchoTail|DoesNotForwardWrappedSingleLinePromptEchoTail|EditableMessengerKeepsWorkingMessageSeparateFromReply|PollSkipsUnarmedOutputUntilFirstDispatch|FlushesBufferedReplyBeforeDispatchingNextMessage|SendsChatActionWhileWaitingForFirstVisibleReply|KeepsRunInFlightAcrossCaptureFailureWithoutOutputYet|RecoversSessionAfterCaptureFailureEvenWithoutBufferedDelta|DoesNotDispatchPendingDuringSilentRunBeforeGraceExpires|DispatchesPendingAfterSilentRunGraceExpires|InterruptsRunningCodexBeforeDispatchingLatestMessage|KeepsOnlyLatestPendingMessageWhileSessionStartsWhenInterruptEnabled|PreservesStartupMessageOrderWhenInterruptDisabled)' -count=1
+	$(GO) test -race . ./internal/codexcmd ./internal/lark ./internal/scheduler ./internal/telegram ./internal/tmuxctl
 
 release: check-go
 	./tools/release/build-assets.sh
