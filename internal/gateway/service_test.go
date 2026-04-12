@@ -897,18 +897,17 @@ func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// ensureSession and refreshDispatchBaseline use s.history (not CaptureFullHistory)
+	// so they fall through to the captures queue. The old-history text is used as the
+	// baseline so that poll snapshots containing only the tail are correctly sliced.
 	console := &fakeConsole{
-		capturesByHistory: map[int][]string{
-			tmuxctl.CaptureFullHistory: {
-				"• old reply one\n\n• old reply two",
-				"• old reply one\n\n• old reply two",
-			},
-		},
 		captures: []string{
-			"• old reply two\n\n• Working (1s • esc to interrupt)",
-			"• old reply two\n\n• new reply start",
-			"• old reply two\n\n• new reply start\n\n• new reply final",
-			"• old reply two\n\n• new reply start\n\n• new reply final",
+			"• old reply one\n\n• old reply two",                    // ensureSession baseline
+			"• old reply one\n\n• old reply two",                    // refreshDispatchBaseline
+			"• old reply two\n\n• Working (1s • esc to interrupt)",  // poll: busy
+			"• old reply two\n\n• new reply start",                  // poll: reply starts
+			"• old reply two\n\n• new reply start\n\n• new reply final", // poll: reply done
+			"• old reply two\n\n• new reply start\n\n• new reply final", // poll: idle confirm
 		},
 	}
 	messenger := &fakeMessenger{}
@@ -938,15 +937,16 @@ func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	if !strings.Contains(joined, "new reply start") {
 		t.Fatalf("messages = %#v, want current reply forwarded", messenger.all())
 	}
+	// Verify that ensureSession and refreshDispatchBaseline used s.history (not unlimited).
 	histories := console.allCaptureHistory()
-	fullCaptures := 0
-	for _, history := range histories {
-		if history == tmuxctl.CaptureFullHistory {
-			fullCaptures++
+	historyCaptures := 0
+	for _, h := range histories {
+		if h == svc.history {
+			historyCaptures++
 		}
 	}
-	if fullCaptures < 2 {
-		t.Fatalf("capture histories = %#v, want full-history captures for startup and dispatch baselines", histories)
+	if historyCaptures < 2 {
+		t.Fatalf("capture histories = %#v, want >=2 captures with s.history=%d for startup and dispatch baselines", histories, svc.history)
 	}
 }
 
@@ -958,7 +958,7 @@ func TestServiceDoesNotReplayLateResumeBackfillBeforeBusy(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			tmuxctl.CaptureFullHistory: {
+			2000: {
 				"• old reply one\n\n• old reply two",
 				"• old reply one\n\n• old reply two",
 			},
@@ -1011,7 +1011,7 @@ func TestServiceForwardsFastReplyWhenNoBusySnapshotIsObserved(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			tmuxctl.CaptureFullHistory: {"", ""},
+			2000: {"", ""},
 		},
 		captures: []string{
 			"• final reply\n\n› hello",
@@ -1054,7 +1054,7 @@ func TestServiceDoesNotForwardMultilinePromptEchoTail(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			tmuxctl.CaptureFullHistory: {"", ""},
+			2000: {"", ""},
 		},
 		captures: []string{
 			"• Working (1s • esc to interrupt)",
@@ -1129,7 +1129,7 @@ func TestServiceDoesNotForwardWrappedSingleLinePromptEchoTail(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			tmuxctl.CaptureFullHistory: {"", ""},
+			2000: {"", ""},
 		},
 		captures: []string{
 			"• Working (1s • esc to interrupt)",
@@ -1243,7 +1243,7 @@ func TestServiceEditableMessengerKeepsWorkingMessageSeparateFromReply(t *testing
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			tmuxctl.CaptureFullHistory: {"", ""},
+			2000: {"", ""},
 		},
 		captures: []string{
 			"• Working (1s • esc to interrupt)",
@@ -2986,7 +2986,7 @@ func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			tmuxctl.CaptureFullHistory: {"• stale one\n• stale two"},
+			2000: {"• stale one\n• stale two"},
 		},
 		captures: []string{
 			"• stale one\n• stale two",
@@ -3253,7 +3253,7 @@ func TestServiceFlushesBufferedReplyBeforeDispatchingNextMessage(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			tmuxctl.CaptureFullHistory: {"", ""},
+			2000: {"", ""},
 		},
 		captures: []string{
 			"• first reply",
