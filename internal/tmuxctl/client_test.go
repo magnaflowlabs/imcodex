@@ -146,8 +146,6 @@ func TestExpandLaunchCommandTemplate(t *testing.T) {
 }
 
 func TestClientSendTextUsesBracketedPaste(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "tmux.log")
 	contentPath := filepath.Join(dir, "buffer.txt")
@@ -166,9 +164,7 @@ case "$1" in
     ;;
 esac
 `, shellQuote(logPath), shellQuote(contentPath))
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	writeExecutableScript(t, scriptPath, script)
 
 	client := New()
 	client.bin = scriptPath
@@ -203,8 +199,6 @@ esac
 }
 
 func TestClientInterruptUsesEscapeAndCtrlC(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "tmux.log")
 	scriptPath := filepath.Join(dir, "tmux")
@@ -219,9 +213,7 @@ case "$1" in
     ;;
 esac
 `, shellQuote(logPath))
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	writeExecutableScript(t, scriptPath, script)
 
 	client := New()
 	client.bin = scriptPath
@@ -247,8 +239,6 @@ esac
 }
 
 func TestClientCaptureSupportsFullHistory(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "tmux.log")
 	scriptPath := filepath.Join(dir, "tmux")
@@ -266,9 +256,7 @@ case "$1" in
     ;;
 esac
 `, shellQuote(logPath))
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	writeExecutableScript(t, scriptPath, script)
 
 	client := New()
 	client.bin = scriptPath
@@ -306,8 +294,6 @@ func TestEnsureSessionRejectsMissingWorkingDirectory(t *testing.T) {
 }
 
 func TestSetControlPaneMarksPaneRole(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "tmux.log")
 	scriptPath := filepath.Join(dir, "tmux")
@@ -319,9 +305,7 @@ case "$1" in
     ;;
 esac
 `, shellQuote(logPath))
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	writeExecutableScript(t, scriptPath, script)
 
 	client := New()
 	client.bin = scriptPath
@@ -343,8 +327,6 @@ esac
 }
 
 func TestFindExistingControlPanePrefersPaneRoleMarker(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "tmux")
 	script := `#!/bin/sh
@@ -354,9 +336,7 @@ case "$1" in
     ;;
 esac
 `
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	writeExecutableScript(t, scriptPath, script)
 
 	client := New()
 	client.bin = scriptPath
@@ -432,6 +412,41 @@ func requireTmux(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
+}
+
+func writeExecutableScript(t *testing.T, path string, script string) {
+	t.Helper()
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		t.Fatalf("CreateTemp() error = %v", err)
+	}
+	tmpPath := tmp.Name()
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.WriteString(script); err != nil {
+		_ = tmp.Close()
+		t.Fatalf("WriteString() error = %v", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		t.Fatalf("Rename() error = %v", err)
+	}
+	cleanupTemp = false
 }
 
 func waitForCaptureContains(t *testing.T, client *Client, session string, want string) {
