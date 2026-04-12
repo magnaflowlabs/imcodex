@@ -119,9 +119,14 @@ func TestDefaultLaunchCommandUsesNeverApprovalAndDangerFullAccess(t *testing.T) 
 	t.Parallel()
 
 	got := defaultLaunchCommand(SessionSpec{CWD: "/srv/demo"})
-	want := "exec 'codex' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C' '/srv/demo'"
-	if got != want {
-		t.Fatalf("defaultLaunchCommand() = %q, want %q", got, want)
+	for _, want := range []string{
+		`'codex' 'resume' '--last' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C' '/srv/demo'`,
+		`if [ "$CODEX_RESUME_STATUS" -eq 0 ]; then exit 0; fi`,
+		`exec 'codex' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C' '/srv/demo'`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("defaultLaunchCommand() = %q, want substring %q", got, want)
+		}
 	}
 }
 
@@ -238,6 +243,51 @@ esac
 	}
 	if !strings.Contains(logText, "send-keys -t %42 C-c") {
 		t.Fatalf("tmux log = %q, want C-c force interrupt", logText)
+	}
+}
+
+func TestClientCaptureSupportsFullHistory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	scriptPath := filepath.Join(dir, "tmux")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+case "$1" in
+  show-options)
+    printf '%%%%42\n'
+    ;;
+  display-message)
+    printf '%%%%42\n'
+    ;;
+  capture-pane)
+    printf 'full snapshot\n'
+    ;;
+esac
+`, shellQuote(logPath))
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	client := New()
+	client.bin = scriptPath
+
+	got, err := client.Capture(context.Background(), "demo", CaptureFullHistory)
+	if err != nil {
+		t.Fatalf("Capture() error = %v", err)
+	}
+	if got != "full snapshot\n" {
+		t.Fatalf("Capture() = %q, want full snapshot output", got)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "capture-pane -pJ -S - -t %42") {
+		t.Fatalf("tmux log = %q, want full-history capture-pane invocation", logText)
 	}
 }
 

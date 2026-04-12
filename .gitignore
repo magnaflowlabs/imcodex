@@ -15,3 +15,5 @@ build/
 config.yaml
 .imcodex/
 .DS_Store
+docs/code-review/
+.claude/

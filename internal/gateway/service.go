@@ -153,6 +153,10 @@ type groupRuntime struct {
 	outputArmed          bool
 	promptEchoTail       string
 	promptEchoPending    bool
+	runBusySeen          bool
+	preBusyMutedText     string
+	preBusyMutedChanges  int
+	preBusyMutedStable   int
 	sessionReady         bool
 	lastText             string
 	baseText             string
@@ -433,17 +437,18 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		return err
 	}
 
-	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
+	snapshot, err := s.console.Capture(s.ctx, rt.session, tmuxctl.CaptureFullHistory)
 	if err != nil {
 		return err
 	}
 
 	captured := tmuxctl.NormalizeSnapshot(snapshot)
+	busy := tmuxctl.IsBusy(snapshot)
 	if !recoveringOutput {
 		rt.lastText = captured
 		rt.baseText = ""
 	}
-	rt.lastBusy = tmuxctl.IsBusy(snapshot)
+	rt.lastBusy = busy
 	if recoveringOutput && rt.active != nil {
 		currText := strings.Trim(tmuxctl.SliceAfter(rt.baseText, captured), "\n")
 		if !rt.lastBusy && !s.shouldHoldBusyForSilentRun(rt, currText, time.Now()) {
@@ -461,6 +466,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.statusMessage = trackedMessage{}
 		rt.promptEchoTail = ""
 		rt.promptEchoPending = false
+		rt.runBusySeen = false
+		rt.clearPreBusyMutedState()
 		rt.outputBackoffUntil = time.Time{}
 		rt.detachedBackoffUntil = time.Time{}
 		rt.detachedRetryCount = 0
@@ -475,6 +482,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.busySince = time.Time{}
 		rt.workingSent = false
 		rt.workingBackoffUntil = time.Time{}
+		rt.runBusySeen = false
+		rt.clearPreBusyMutedState()
 	} else if rt.busySince.IsZero() && rt.lastBusy {
 		rt.busySince = time.Now()
 	}
@@ -527,6 +536,8 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 			rt.outputArmed = false
 			rt.promptEchoTail = ""
 			rt.promptEchoPending = false
+			rt.runBusySeen = false
+			rt.clearPreBusyMutedState()
 			rt.clearOutputBuffer()
 			rt.outputText = ""
 			rt.outputMessages = nil
@@ -608,6 +619,8 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	rt.outputArmed = true
 	rt.promptEchoTail = normalizePromptEchoTail(req.input)
 	rt.promptEchoPending = rt.promptEchoTail != ""
+	rt.runBusySeen = false
+	rt.clearPreBusyMutedState()
 	rt.clearOutputBuffer()
 	rt.outputText = ""
 	rt.editBackoffUntil = time.Time{}
@@ -640,10 +653,7 @@ func (s *Service) refreshDispatchBaseline(rt *groupRuntime) string {
 	if rt == nil || strings.TrimSpace(rt.session) == "" {
 		return ""
 	}
-	if strings.TrimSpace(rt.lastText) == "" {
-		return rt.lastText
-	}
-	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
+	snapshot, err := s.console.Capture(s.ctx, rt.session, tmuxctl.CaptureFullHistory)
 	if err != nil {
 		s.logger.Warn("capture dispatch baseline failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
 		return rt.lastText
@@ -667,15 +677,18 @@ func (s *Service) poll(rt *groupRuntime) {
 			rt.lastBusy = false
 			rt.busySince = time.Time{}
 			rt.workingSent = false
+			rt.runBusySeen = false
+			rt.clearPreBusyMutedState()
 			rt.active = nil
 		}
 		return
 	}
 
+	now := time.Now()
 	currFullText := tmuxctl.NormalizeSnapshot(snapshot)
+	busyRaw := tmuxctl.IsBusy(snapshot)
 	prevText := tmuxctl.SliceAfter(rt.baseText, rt.lastText)
 	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
-	now := time.Now()
 	if rt.promptEchoPending {
 		prevText, _ = suppressPromptEchoPrefix(prevText, rt.promptEchoTail)
 		var consumed bool
@@ -684,10 +697,29 @@ func (s *Service) poll(rt *groupRuntime) {
 			rt.promptEchoPending = false
 		}
 	}
+	idleConfirmTicks := s.idleConfirmTicks
+	if idleConfirmTicks <= 0 {
+		idleConfirmTicks = 1
+	}
 	delta, reset := tmuxctl.DiffText(prevText, currText)
-	busyRaw := tmuxctl.IsBusy(snapshot)
+	if rt.outputArmed && rt.active != nil && !rt.runBusySeen {
+		if busyRaw {
+			rt.runBusySeen = true
+			rt.clearPreBusyMutedState()
+		} else if (reset || strings.TrimSpace(currText) != "") && strings.TrimSpace(rt.baseText) != "" {
+			rt.notePreBusyMutedText(currText)
+			rt.baseText = currFullText
+			rt.lastText = currFullText
+			delta = ""
+			reset = false
+		} else if strings.TrimSpace(rt.preBusyMutedText) != "" {
+			rt.preBusyMutedStable++
+		}
+	}
 	heldSilentBusy := false
-	if !busyRaw && s.shouldHoldBusyForSilentRun(rt, currText, now) {
+	if !busyRaw &&
+		!(rt.active != nil && !rt.runBusySeen && strings.TrimSpace(rt.preBusyMutedText) != "") &&
+		s.shouldHoldBusyForSilentRun(rt, currText, now) {
 		busyRaw = true
 		heldSilentBusy = true
 	}
@@ -731,11 +763,8 @@ func (s *Service) poll(rt *groupRuntime) {
 	} else {
 		rt.idleTicks++
 	}
-	idleConfirmTicks := s.idleConfirmTicks
-	if idleConfirmTicks <= 0 {
-		idleConfirmTicks = 1
-	}
-	busy := busyRaw || (rt.active != nil && rt.idleTicks < idleConfirmTicks)
+	preBusyHolding := rt.holdingPreBusyMutedOutput(idleConfirmTicks)
+	busy := busyRaw || preBusyHolding || (rt.active != nil && rt.idleTicks < idleConfirmTicks)
 	becameIdle := rt.lastBusy && !busy
 
 	deferSnapshotCommit := false
@@ -777,6 +806,9 @@ func (s *Service) poll(rt *groupRuntime) {
 	busyChanged := rt.lastBusy != busy
 	rt.lastBusy = busy
 	if !busy {
+		s.promoteStablePreBusyMutedOutput(rt, now)
+		rt.runBusySeen = false
+		rt.clearPreBusyMutedState()
 		if !rt.hasPendingOutputDelivery() {
 			s.clearWorkingStatus(rt)
 			rt.workingSent = false
@@ -906,6 +938,33 @@ func hasVisibleRunOutput(rt *groupRuntime, currText string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Service) promoteStablePreBusyMutedOutput(rt *groupRuntime, now time.Time) {
+	if rt == nil {
+		return
+	}
+	candidate := strings.Trim(rt.preBusyMutedText, "\n")
+	if candidate == "" {
+		return
+	}
+	if rt.preBusyMutedChanges == 0 {
+		return
+	}
+	if rt.preBusyMutedChanges > 1 {
+		s.logger.Warn("pre-busy muted output has multiple changes; promoting final text",
+			"group_id", rt.opts.GroupID,
+			"changes", rt.preBusyMutedChanges,
+			"text_len", len(candidate),
+		)
+	}
+	if rt.hasBufferedOutput() ||
+		strings.TrimSpace(rt.outputText) != "" ||
+		len(rt.outputMessages) > 0 ||
+		len(rt.detachedOutputs) > 0 {
+		return
+	}
+	rt.replaceOutputBuffer(candidate, now)
 }
 
 func (s *Service) shouldDeferBodyFlush(rt *groupRuntime, now time.Time) bool {
@@ -1418,6 +1477,9 @@ func (s *Service) startDelivery(rt *groupRuntime, run func(context.Context) (del
 		serviceCtx = s.ctx
 	}
 	go func() {
+		if s == nil {
+			return
+		}
 		ctx, cancel := s.deliveryContext()
 		defer cancel()
 		result, err := run(ctx)
@@ -1794,7 +1856,7 @@ func mergeBufferedOutput(existing string, delta string) string {
 	if strings.HasSuffix(existing, delta) {
 		return existing
 	}
-	if overlap := suffixPrefixOverlap(existing, delta); usableMergeOverlap(existing, delta, overlap) {
+	if overlap := tmuxctl.SuffixPrefixOverlap(existing, delta); usableMergeOverlap(existing, delta, overlap) {
 		return existing + delta[overlap:]
 	}
 	return existing + delta
@@ -1808,29 +1870,6 @@ func usableMergeOverlap(existing string, delta string, overlap int) bool {
 	prevBoundary := prevStart == 0 || existing[prevStart-1] == '\n'
 	currBoundary := overlap == len(delta) || delta[overlap] == '\n'
 	return prevBoundary && currBoundary
-}
-
-func suffixPrefixOverlap(prev string, curr string) int {
-	if prev == "" || curr == "" {
-		return 0
-	}
-	combined := curr + "\x00" + prev
-	pi := make([]int, len(combined))
-	for i := 1; i < len(combined); i++ {
-		j := pi[i-1]
-		for j > 0 && combined[i] != combined[j] {
-			j = pi[j-1]
-		}
-		if combined[i] == combined[j] {
-			j++
-		}
-		pi[i] = j
-	}
-	overlap := pi[len(pi)-1]
-	if overlap > len(curr) {
-		return len(curr)
-	}
-	return overlap
 }
 
 func retryAfterFromRateLimitError(err error) time.Duration {
@@ -1923,6 +1962,38 @@ func (rt *groupRuntime) clearOutputBuffer() {
 	rt.outputBufferedAt = time.Time{}
 	rt.outputBufferedTicks = 0
 	rt.lastOutputWatchdogAt = time.Time{}
+}
+
+func (rt *groupRuntime) notePreBusyMutedText(text string) {
+	if rt == nil {
+		return
+	}
+	text = strings.Trim(text, "\n")
+	if text == rt.preBusyMutedText {
+		return
+	}
+	rt.preBusyMutedText = text
+	rt.preBusyMutedChanges++
+	rt.preBusyMutedStable = 0
+}
+
+func (rt *groupRuntime) clearPreBusyMutedState() {
+	if rt == nil {
+		return
+	}
+	rt.preBusyMutedText = ""
+	rt.preBusyMutedChanges = 0
+	rt.preBusyMutedStable = 0
+}
+
+func (rt *groupRuntime) holdingPreBusyMutedOutput(idleConfirmTicks int) bool {
+	if rt == nil || rt.active == nil || rt.runBusySeen || strings.TrimSpace(rt.preBusyMutedText) == "" {
+		return false
+	}
+	if idleConfirmTicks <= 0 {
+		idleConfirmTicks = 1
+	}
+	return rt.preBusyMutedStable < idleConfirmTicks
 }
 
 func (rt *groupRuntime) hasBufferedOutput() bool {
@@ -2379,9 +2450,39 @@ func (s *Service) syncEditableOutput(rt *groupRuntime, editable EditableMessenge
 func (s *Service) syncEditableOutputSnapshot(ctx context.Context, editable EditableMessenger, groupID string, existing []trackedMessage, desiredText string, freezeCompleted bool) ([]trackedMessage, error) {
 	next, err := syncEditableOutputState(ctx, editable, groupID, existing, desiredText, freezeCompleted, s.editRolloverAt)
 	if shouldResetEditableThread(err) {
+		// The first attempt may have created new messages that are now orphaned
+		// (they exist in the IM platform but we're about to discard their IDs).
+		// Prune any newly created messages before retrying with a clean slate.
+		if orphans := orphanedMessages(existing, next); len(orphans) > 0 {
+			s.logger.Warn("pruning orphaned messages before editable thread reset",
+				"group_id", groupID,
+				"orphan_count", len(orphans),
+			)
+			pruneStaleEditableMessagesState(ctx, editable, groupID, orphans)
+		}
 		next, err = syncEditableOutputState(ctx, editable, groupID, nil, desiredText, false, s.editRolloverAt)
 	}
 	return next, err
+}
+
+// orphanedMessages returns messages that are in next but not in existing —
+// i.e. messages newly created during a failed syncEditableOutputState call.
+func orphanedMessages(existing []trackedMessage, next []trackedMessage) []trackedMessage {
+	known := make(map[string]struct{}, len(existing))
+	for _, m := range existing {
+		if m.messageID != "" {
+			known[m.messageID] = struct{}{}
+		}
+	}
+	var orphans []trackedMessage
+	for _, m := range next {
+		if m.messageID != "" {
+			if _, ok := known[m.messageID]; !ok {
+				orphans = append(orphans, m)
+			}
+		}
+	}
+	return orphans
 }
 
 func syncEditableOutputState(ctx context.Context, editable EditableMessenger, groupID string, existing []trackedMessage, desiredText string, freezeCompleted bool, rolloverAt int) ([]trackedMessage, error) {

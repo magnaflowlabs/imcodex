@@ -208,16 +208,18 @@ func (f *fakeEditableMessenger) actionCount() int {
 }
 
 type fakeConsole struct {
-	mu            sync.Mutex
-	captures      []string
-	captureErrors []error
-	sendTexts     []string
-	ensureSpecs   []tmuxctl.SessionSpec
-	interrupts    []string
-	ensureErrors  []error
-	sendErrors    []error
-	ensureEntered chan struct{}
-	ensureBlock   <-chan struct{}
+	mu                sync.Mutex
+	captures          []string
+	capturesByHistory map[int][]string
+	captureErrors     []error
+	captureHistory    []int
+	sendTexts         []string
+	ensureSpecs       []tmuxctl.SessionSpec
+	interrupts        []string
+	ensureErrors      []error
+	sendErrors        []error
+	ensureEntered     chan struct{}
+	ensureBlock       <-chan struct{}
 }
 
 func (f *fakeConsole) EnsureSession(_ context.Context, spec tmuxctl.SessionSpec) (bool, error) {
@@ -269,7 +271,7 @@ func (f *fakeConsole) SendText(_ context.Context, _ string, text string) error {
 	return nil
 }
 
-func (f *fakeConsole) Capture(context.Context, string, int) (string, error) {
+func (f *fakeConsole) Capture(_ context.Context, _ string, history int) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.captureErrors) > 0 {
@@ -280,6 +282,16 @@ func (f *fakeConsole) Capture(context.Context, string, int) (string, error) {
 		if err != nil {
 			return "", err
 		}
+	}
+	f.captureHistory = append(f.captureHistory, history)
+	if queue := f.capturesByHistory[history]; len(queue) > 0 {
+		out := queue[0]
+		if len(queue) > 1 {
+			f.capturesByHistory[history] = queue[1:]
+		} else {
+			delete(f.capturesByHistory, history)
+		}
+		return out, nil
 	}
 	if len(f.captures) == 0 {
 		return "", nil
@@ -318,6 +330,14 @@ func (f *fakeConsole) allInterrupts() []string {
 	defer f.mu.Unlock()
 	out := make([]string, len(f.interrupts))
 	copy(out, f.interrupts)
+	return out
+}
+
+func (f *fakeConsole) allCaptureHistory() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]int, len(f.captureHistory))
+	copy(out, f.captureHistory)
 	return out
 }
 
@@ -850,6 +870,8 @@ func TestServiceIgnoresHollowBulletWorkingTimerTicks(t *testing.T) {
 	svc.history = 2000
 	svc.startWait = 0
 	svc.flushIdleTicks = 1
+	svc.detachedSendEvery = 0
+	svc.detachedSendEvery = 0
 
 	if err := svc.HandleMessage(context.Background(), IncomingMessage{
 		MessageID: "om_1",
@@ -876,12 +898,17 @@ func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	defer cancel()
 
 	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {
+				"• old reply one\n\n• old reply two",
+				"• old reply one\n\n• old reply two",
+			},
+		},
 		captures: []string{
-			"• old reply one\n\n• old reply two",
-			"• old reply one\n\n• old reply two\n\n• Working (1s • esc to interrupt)",
-			"• old reply one\n\n• old reply two\n\n• new reply start",
-			"• old reply one\n\n• old reply two\n\n• new reply start\n\n• new reply final",
-			"• old reply one\n\n• old reply two\n\n• new reply start\n\n• new reply final",
+			"• old reply two\n\n• Working (1s • esc to interrupt)",
+			"• old reply two\n\n• new reply start",
+			"• old reply two\n\n• new reply start\n\n• new reply final",
+			"• old reply two\n\n• new reply start\n\n• new reply final",
 		},
 	}
 	messenger := &fakeMessenger{}
@@ -911,6 +938,112 @@ func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	if !strings.Contains(joined, "new reply start") {
 		t.Fatalf("messages = %#v, want current reply forwarded", messenger.all())
 	}
+	histories := console.allCaptureHistory()
+	fullCaptures := 0
+	for _, history := range histories {
+		if history == tmuxctl.CaptureFullHistory {
+			fullCaptures++
+		}
+	}
+	if fullCaptures < 2 {
+		t.Fatalf("capture histories = %#v, want full-history captures for startup and dispatch baselines", histories)
+	}
+}
+
+func TestServiceDoesNotReplayLateResumeBackfillBeforeBusy(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {
+				"• old reply one\n\n• old reply two",
+				"• old reply one\n\n• old reply two",
+			},
+		},
+		captures: []string{
+			"• old reply two\n\n• old reply three",
+			"• old reply three\n\n• old reply four",
+			"• old reply three\n\n• old reply four\n\n• Working (1s • esc to interrupt)",
+			"• old reply three\n\n• old reply four\n\n• new reply final",
+			"• old reply three\n\n• old reply four\n\n• new reply final",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.detachedSendEvery = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "new question",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "new reply final")
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if strings.Contains(joined, "old reply three") || strings.Contains(joined, "old reply four") {
+		t.Fatalf("messages = %#v, want late resume backfill excluded", messenger.all())
+	}
+	if !strings.Contains(joined, "new reply final") {
+		t.Fatalf("messages = %#v, want current reply forwarded", messenger.all())
+	}
+}
+
+func TestServiceForwardsFastReplyWhenNoBusySnapshotIsObserved(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {"", ""},
+		},
+		captures: []string{
+			"• final reply\n\n› hello",
+			"• final reply\n\n› hello",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.idleConfirmTicks = 1
+	svc.flushIdleTicks = 1
+	svc.detachedSendEvery = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "hello",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 1 && got[0] == "• final reply"
+	})
+
+	if got := nonStatusMessages(messenger.all()); len(got) != 1 || got[0] != "• final reply" {
+		t.Fatalf("messages = %#v, want fast final reply forwarded", got)
+	}
 }
 
 func TestServiceDoesNotForwardMultilinePromptEchoTail(t *testing.T) {
@@ -920,8 +1053,10 @@ func TestServiceDoesNotForwardMultilinePromptEchoTail(t *testing.T) {
 	defer cancel()
 
 	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {"", ""},
+		},
 		captures: []string{
-			"",
 			"• Working (1s • esc to interrupt)",
 			"› line one\nline two\nline three\n\n• final reply",
 			"› line one\nline two\nline three\n\n• final reply",
@@ -993,8 +1128,10 @@ func TestServiceDoesNotForwardWrappedSingleLinePromptEchoTail(t *testing.T) {
 	defer cancel()
 
 	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {"", ""},
+		},
 		captures: []string{
-			"",
 			"• Working (1s • esc to interrupt)",
 			"› this is a very long single-line prompt\nthat wrapped in the terminal\n\n• final reply",
 			"› this is a very long single-line prompt\nthat wrapped in the terminal\n\n• final reply",
@@ -1105,8 +1242,10 @@ func TestServiceEditableMessengerKeepsWorkingMessageSeparateFromReply(t *testing
 	defer cancel()
 
 	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {"", ""},
+		},
 		captures: []string{
-			"",
 			"• Working (1s • esc to interrupt)",
 			"• final reply",
 			"• final reply",
@@ -2846,9 +2985,12 @@ func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 	defer cancel()
 
 	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {"• stale one\n• stale two"},
+		},
 		captures: []string{
 			"• stale one\n• stale two",
-			"• stale one\n• stale two",
+			"• stale one\n• stale two\n• Working (1s • esc to interrupt)",
 			"• stale one\n• stale two\n• fresh reply",
 			"• stale one\n• stale two\n• fresh reply",
 			"• stale one\n• stale two\n• fresh reply\n• unsolicited",
@@ -2863,6 +3005,7 @@ func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 	rt := &groupRuntime{
 		opts:         svc.opts,
 		session:      svc.opts.SessionName,
+		deliveryDone: make(chan deliveryCompletion, 8),
 		sessionReady: true,
 		lastText:     "• stale one",
 		outputArmed:  false,
@@ -2880,6 +3023,13 @@ func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 		t.Fatalf("dispatchPrepared() error = %v", err)
 	}
 	svc.poll(rt)
+	svc.poll(rt)
+	applyNextDelivery(t, rt)
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 1 && got[0] == "• fresh reply"
+	})
 
 	got := nonStatusMessages(messenger.all())
 	if len(got) != 1 || got[0] != "• fresh reply" {
@@ -2895,6 +3045,11 @@ func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 	}
 
 	svc.poll(rt)
+	applyNextDelivery(t, rt)
+	waitFor(t, 500*time.Millisecond, func() bool {
+		got := nonStatusMessages(messenger.all())
+		return len(got) == 2 && got[1] == "• unsolicited"
+	})
 	if got := nonStatusMessages(messenger.all()); len(got) != 2 || got[1] != "• unsolicited" {
 		t.Fatalf("messages after first dispatch = %#v, want ongoing forwarding while armed", got)
 	}
@@ -3097,8 +3252,10 @@ func TestServiceFlushesBufferedReplyBeforeDispatchingNextMessage(t *testing.T) {
 	defer cancel()
 
 	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {"", ""},
+		},
 		captures: []string{
-			"",
 			"• first reply",
 			"• first reply",
 			"• first reply",

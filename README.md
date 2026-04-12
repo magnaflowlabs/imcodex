@@ -160,7 +160,8 @@ When `imcodex` runs in `docker-codex` mode:
 - if `docker_image` is set, it runs that prebuilt image directly and skips managed-image rebuild checks
 - it mounts only the configured group `cwd` into the container as `/workspace`
 - it copies the host Codex config directory into container-local `/home/agent/.codex`
-- it launches Codex inside the container with:
+- it first tries `codex resume --last`
+- if that resume attempt exits non-zero, it falls back to a fresh Codex session with:
 
 ```bash
 codex -a never -s danger-full-access --no-alt-screen -C /workspace
