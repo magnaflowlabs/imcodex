@@ -1,27 +1,42 @@
-FROM node:20-bookworm-slim
+FROM node:22-trixie-slim AS builder
 
-ARG CODEX_VERSION=0.118.0
+ARG CODEX_VERSION=0.120.0
+
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+      amd64) codex_arch=x64 ;; \
+      arm64) codex_arch=arm64 ;; \
+      *) echo "unsupported architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    tmpdir="$(mktemp -d)"; \
+    cd "${tmpdir}"; \
+    npm pack --silent "@openai/codex@${CODEX_VERSION}-linux-${codex_arch}" >/dev/null; \
+    tar -xzf ./*.tgz; \
+    install -D -m 0755 package/vendor/*/codex/codex /out/usr/local/bin/codex; \
+    install -D -m 0755 package/vendor/*/path/rg /out/usr/local/bin/rg
+
+FROM alpine:3.22
+
+ARG CODEX_VERSION=0.120.0
 ARG IMCODEX_IMAGE_REVISION=dev
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates git gosu ripgrep \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache bubblewrap ca-certificates git su-exec \
+    && apk upgrade --no-cache
 
-RUN useradd --create-home --shell /bin/bash agent
+RUN adduser -D -h /home/agent agent
 ENV HOME=/home/agent
 ENV CODEX_HOME=/home/agent/.codex
-ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global
-ENV PATH=/home/agent/.npm-global/bin:${PATH}
 ENV IMCODEX_CODEX_VERSION=${CODEX_VERSION}
 
-RUN mkdir -p "${NPM_CONFIG_PREFIX}" "${CODEX_HOME}" /workspace \
-    && chown -R agent:agent /home/agent /workspace
+COPY --from=builder /out/ /
 
-RUN gosu agent npm install -g @openai/codex@${CODEX_VERSION}
+RUN mkdir -p "${CODEX_HOME}" /workspace \
+    && chown -R agent:agent /home/agent /workspace
 
 WORKDIR /workspace
 
 LABEL com.magnaflowlabs.imcodex.codex-version="${CODEX_VERSION}"
 LABEL com.magnaflowlabs.imcodex.image-revision="${IMCODEX_IMAGE_REVISION}"
 
-CMD ["bash", "-lc", "exec gosu agent codex -a never -s danger-full-access --no-alt-screen -C /workspace"]
+CMD ["sh", "-lc", "set -eu; mkdir -p /home/agent/.codex; if [ -d /config-ro ]; then cp -a /config-ro/. /home/agent/.codex/; fi; chown -R agent:agent /home/agent; exec su-exec agent sh -lc 'codex -a never -s danger-full-access --no-alt-screen -C /workspace'"]

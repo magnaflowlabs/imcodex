@@ -21,7 +21,7 @@ const (
 	internalDockerCodexCommand = "internal-run-docker-codex"
 	defaultDockerCodexImage    = "imcodex-codex:stable"
 	defaultCodexConfigDirName  = ".codex"
-	dockerCodexStableVersion   = "0.118.0"
+	dockerCodexStableVersion   = "0.120.0"
 	dockerCodexLabelVersion    = "com.magnaflowlabs.imcodex.codex-version"
 	dockerCodexLabelRevision   = "com.magnaflowlabs.imcodex.image-revision"
 	dockerAgentUser            = "agent"
@@ -254,17 +254,17 @@ func buildDockerRunArgs(image string, workspace string, session string, configDi
 	if configDir != "" {
 		args = append(args, "--mount", fmt.Sprintf("type=bind,src=%s,dst=/config-ro,readonly", configDir))
 	}
-	args = append(args, image, "bash", "-lc", dockerCodexEntrypointScript())
+	args = append(args, image, "sh", "-lc", dockerCodexEntrypointScript())
 	return args
 }
 
 func dockerCodexEntrypointScript() string {
 	configHome := dockerAgentHome + "/.codex"
-	return "set -euo pipefail; " +
+	return "set -eu; " +
 		"mkdir -p " + shellQuote(configHome) + "; " +
-		"if [[ -d /config-ro ]]; then cp -a /config-ro/. " + shellQuote(configHome) + "/; fi; " +
+		"if [ -d /config-ro ]; then cp -a /config-ro/. " + shellQuote(configHome) + "/; fi; " +
 		"chown -R " + shellQuote(dockerAgentUser+":"+dockerAgentUser) + " " + shellQuote(dockerAgentHome) + "; " +
-		"exec gosu " + shellQuote(dockerAgentUser) + " bash -lc " + shellQuote(codexcmd.LaunchCommand(dockerWorkspaceDir))
+		"exec su-exec " + shellQuote(dockerAgentUser) + " sh -lc " + shellQuote(codexcmd.LaunchCommand(dockerWorkspaceDir))
 }
 
 func dockerContainerName(session string, workspace string) string {
