@@ -74,7 +74,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          codex_version="$(sed -n 's/^ARG CODEX_VERSION=//p' tools/runtime/Dockerfile.codex)"
+          codex_version="$(awk -F= '/^ARG CODEX_VERSION=/{print $2; exit}' tools/runtime/Dockerfile.codex)"
           if [[ -z "${codex_version}" ]]; then
             echo "failed to determine CODEX_VERSION from Dockerfile.codex" >&2
             exit 1
