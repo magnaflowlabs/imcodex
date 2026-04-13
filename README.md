@@ -174,7 +174,7 @@ If you want to prebuild the same image manually:
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.120.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.9 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.10 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -211,7 +211,7 @@ and `tmux` session reuse continue to work the same way.
 
 ## Message Delivery
 
-`v2.2.9` keeps host runtime as the default and further hardens Telegram delivery
+`v2.2.10` keeps host runtime as the default and further hardens Telegram delivery
 behavior without changing the public config
 surface:
 

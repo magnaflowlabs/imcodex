@@ -154,6 +154,7 @@ type groupRuntime struct {
 	promptEchoTail       string
 	promptEchoPending    bool
 	runBusySeen          bool
+	runPromptObserved    bool
 	preBusyMutedText     string
 	preBusyMutedChanges  int
 	preBusyMutedStable   int
@@ -467,6 +468,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.promptEchoTail = ""
 		rt.promptEchoPending = false
 		rt.runBusySeen = false
+		rt.runPromptObserved = false
 		rt.clearPreBusyMutedState()
 		rt.outputBackoffUntil = time.Time{}
 		rt.detachedBackoffUntil = time.Time{}
@@ -483,6 +485,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.workingSent = false
 		rt.workingBackoffUntil = time.Time{}
 		rt.runBusySeen = false
+		rt.runPromptObserved = false
 		rt.clearPreBusyMutedState()
 	} else if rt.busySince.IsZero() && rt.lastBusy {
 		rt.busySince = time.Now()
@@ -537,6 +540,7 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 			rt.promptEchoTail = ""
 			rt.promptEchoPending = false
 			rt.runBusySeen = false
+			rt.runPromptObserved = false
 			rt.clearPreBusyMutedState()
 			rt.clearOutputBuffer()
 			rt.outputText = ""
@@ -620,6 +624,7 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	rt.promptEchoTail = normalizePromptEchoTail(req.input)
 	rt.promptEchoPending = rt.promptEchoTail != ""
 	rt.runBusySeen = false
+	rt.runPromptObserved = false
 	rt.clearPreBusyMutedState()
 	rt.clearOutputBuffer()
 	rt.outputText = ""
@@ -653,7 +658,12 @@ func (s *Service) refreshDispatchBaseline(rt *groupRuntime) string {
 	if rt == nil || strings.TrimSpace(rt.session) == "" {
 		return ""
 	}
-	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
+	// Use CaptureFullHistory so the dispatch baseline covers the entire tmux
+	// scrollback buffer. Subsequent poll() calls capture only s.history lines,
+	// which will always be a suffix of this full baseline. SliceAfter can
+	// therefore always find the overlap and return only genuinely new output,
+	// even when the scrollback buffer exceeds s.history lines.
+	snapshot, err := s.console.Capture(s.ctx, rt.session, tmuxctl.CaptureFullHistory)
 	if err != nil {
 		s.logger.Warn("capture dispatch baseline failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
 		return rt.lastText
@@ -678,6 +688,7 @@ func (s *Service) poll(rt *groupRuntime) {
 			rt.busySince = time.Time{}
 			rt.workingSent = false
 			rt.runBusySeen = false
+			rt.runPromptObserved = false
 			rt.clearPreBusyMutedState()
 			rt.active = nil
 		}
@@ -689,10 +700,16 @@ func (s *Service) poll(rt *groupRuntime) {
 	busyRaw := tmuxctl.IsBusy(snapshot)
 	prevText := tmuxctl.SliceAfter(rt.baseText, rt.lastText)
 	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
+	if rt.active != nil && snapshotContainsPromptEcho(snapshot, rt.active.input) {
+		rt.runPromptObserved = true
+	}
 	if rt.promptEchoPending {
 		prevText, _ = suppressPromptEchoPrefix(prevText, rt.promptEchoTail)
 		var consumed bool
 		currText, consumed = suppressPromptEchoPrefix(currText, rt.promptEchoTail)
+		if consumed {
+			rt.runPromptObserved = true
+		}
 		if consumed || strings.TrimSpace(currText) != "" {
 			rt.promptEchoPending = false
 		}
@@ -707,7 +724,11 @@ func (s *Service) poll(rt *groupRuntime) {
 			rt.runBusySeen = true
 			rt.clearPreBusyMutedState()
 		} else if (reset || strings.TrimSpace(currText) != "") && strings.TrimSpace(rt.baseText) != "" {
-			rt.notePreBusyMutedText(currText)
+			if rt.runPromptObserved {
+				rt.notePreBusyMutedText(currText)
+			} else {
+				rt.clearPreBusyMutedState()
+			}
 			rt.baseText = currFullText
 			rt.lastText = currFullText
 			delta = ""
@@ -808,6 +829,7 @@ func (s *Service) poll(rt *groupRuntime) {
 	if !busy {
 		s.promoteStablePreBusyMutedOutput(rt, now)
 		rt.runBusySeen = false
+		rt.runPromptObserved = false
 		rt.clearPreBusyMutedState()
 		if !rt.hasPendingOutputDelivery() {
 			s.clearWorkingStatus(rt)
@@ -1026,6 +1048,46 @@ func suppressPromptEchoPrefix(text string, echoTail string) (string, bool) {
 		return strings.TrimLeft(text[len(echoTail):], "\n"), true
 	}
 	return text, false
+}
+
+func snapshotContainsPromptEcho(snapshot string, input string) bool {
+	input = strings.ReplaceAll(input, "\r\n", "\n")
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return false
+	}
+	firstLine := strings.TrimSpace(strings.Split(input, "\n")[0])
+	if firstLine == "" {
+		return false
+	}
+	snapshot = strings.ReplaceAll(snapshot, "\r\n", "\n")
+	lines := strings.Split(snapshot, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(strings.TrimRight(lines[i], " \t\r"))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "›") {
+			body := strings.TrimSpace(strings.TrimPrefix(line, "›"))
+			return promptBodiesMatch(body, firstLine)
+		}
+		if strings.HasPrefix(line, ">") {
+			body := strings.TrimSpace(strings.TrimPrefix(line, ">"))
+			return promptBodiesMatch(body, firstLine)
+		}
+	}
+	return false
+}
+
+func promptBodiesMatch(body string, firstLine string) bool {
+	body = strings.TrimSpace(body)
+	firstLine = strings.TrimSpace(firstLine)
+	if body == "" || firstLine == "" {
+		return false
+	}
+	return body == firstLine ||
+		strings.Contains(body, firstLine) ||
+		strings.Contains(firstLine, body)
 }
 
 func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
