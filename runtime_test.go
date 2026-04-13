@@ -109,7 +109,7 @@ func TestDockerCodexEntrypointScriptCopiesConfigAndDropsPrivileges(t *testing.T)
 	for _, want := range []string{
 		"cp -a /config-ro/.",
 		"chown -R 'agent:agent' '/home/agent'",
-		`exec gosu 'agent' bash -lc `,
+		`exec su-exec 'agent' sh -lc `,
 		shellQuote(codexcmd.LaunchCommand(dockerWorkspaceDir)),
 	} {
 		if !strings.Contains(script, want) {

@@ -167,23 +167,23 @@ When `imcodex` runs in `docker-codex` mode:
 codex -a never -s danger-full-access --no-alt-screen -C /workspace
 ```
 
-The pinned Docker Codex CLI version for `v2.2.4` is `0.118.0`.
+The pinned Docker Codex CLI version is `0.120.0`.
 
 If you want to prebuild the same image manually:
 
 ```bash
 docker build \
-  --build-arg CODEX_VERSION=0.118.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.4 \
+  --build-arg CODEX_VERSION=0.120.0 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.8 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
 
 Custom images should provide the same runtime contract:
 
-- `bash`
+- `sh`
 - `codex`
-- `gosu`
+- `su-exec` or an equivalent privilege-drop wrapper
 - writable `/home/agent`
 - `/workspace` as the mounted workspace path
 
@@ -211,7 +211,7 @@ and `tmux` session reuse continue to work the same way.
 
 ## Message Delivery
 
-`v2.2.4` keeps host runtime as the default and further hardens Telegram delivery
+`v2.2.8` keeps host runtime as the default and further hardens Telegram delivery
 behavior without changing the public config
 surface:
 

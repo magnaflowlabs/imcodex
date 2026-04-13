@@ -2,7 +2,7 @@
 
 ## Status
 
-Current behavior for `v2.2.4`. This document describes what ships today, not a
+Current behavior for `v2.2.8`. This document describes what ships today, not a
 future proposal.
 
 ## Goals
