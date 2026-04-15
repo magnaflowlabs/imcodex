@@ -50,6 +50,10 @@ func (c *sessionConsole) EnsureSession(context.Context, tmuxctl.SessionSpec) (bo
 	return true, nil
 }
 
+func (c *sessionConsole) ResetSession(context.Context, tmuxctl.SessionSpec) (bool, error) {
+	return true, nil
+}
+
 func (c *sessionConsole) SendText(_ context.Context, session string, text string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

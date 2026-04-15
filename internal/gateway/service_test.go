@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -215,8 +216,10 @@ type fakeConsole struct {
 	captureHistory    []int
 	sendTexts         []string
 	ensureSpecs       []tmuxctl.SessionSpec
+	resetSpecs        []tmuxctl.SessionSpec
 	interrupts        []string
 	ensureErrors      []error
+	resetErrors       []error
 	sendErrors        []error
 	ensureEntered     chan struct{}
 	ensureBlock       <-chan struct{}
@@ -253,6 +256,22 @@ func (f *fakeConsole) ensured() []tmuxctl.SessionSpec {
 	out := make([]tmuxctl.SessionSpec, len(f.ensureSpecs))
 	copy(out, f.ensureSpecs)
 	return out
+}
+
+func (f *fakeConsole) ResetSession(_ context.Context, spec tmuxctl.SessionSpec) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetSpecs = append(f.resetSpecs, spec)
+	if len(f.resetErrors) > 0 {
+		err := f.resetErrors[0]
+		if len(f.resetErrors) > 1 {
+			f.resetErrors = f.resetErrors[1:]
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func (f *fakeConsole) SendText(_ context.Context, _ string, text string) error {
@@ -338,6 +357,14 @@ func (f *fakeConsole) allCaptureHistory() []int {
 	defer f.mu.Unlock()
 	out := make([]int, len(f.captureHistory))
 	copy(out, f.captureHistory)
+	return out
+}
+
+func (f *fakeConsole) allResets() []tmuxctl.SessionSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]tmuxctl.SessionSpec, len(f.resetSpecs))
+	copy(out, f.resetSpecs)
 	return out
 }
 
@@ -903,6 +930,7 @@ func TestServiceDoesNotReplayPreviousHistoryOnNewRequest(t *testing.T) {
 	// when the scrollback buffer exceeds s.history lines.
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
+			200:                        {"• old reply one\n\n• old reply two\n\n› new question"},
 			tmuxctl.CaptureFullHistory: {"• old reply one\n\n• old reply two"}, // refreshDispatchBaseline
 		},
 		captures: []string{
@@ -1077,12 +1105,12 @@ func TestServiceForwardsFastReplyWhenNoBusySnapshotIsObserved(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			2000:                       {""},  // ensureSession baseline
+			2000:                       {""}, // ensureSession baseline
 			tmuxctl.CaptureFullHistory: {""}, // refreshDispatchBaseline
 		},
 		captures: []string{
-			"• final reply\n\n› hello",
-			"• final reply\n\n› hello",
+			"› hello\n\n• final reply",
+			"• final reply",
 		},
 	}
 	messenger := &fakeMessenger{}
@@ -1121,7 +1149,7 @@ func TestServiceDoesNotForwardMultilinePromptEchoTail(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			2000:                       {""},  // ensureSession baseline
+			2000:                       {""}, // ensureSession baseline
 			tmuxctl.CaptureFullHistory: {""}, // refreshDispatchBaseline
 		},
 		captures: []string{
@@ -1197,7 +1225,7 @@ func TestServiceDoesNotForwardWrappedSingleLinePromptEchoTail(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			2000:                       {""},  // ensureSession baseline
+			2000:                       {""}, // ensureSession baseline
 			tmuxctl.CaptureFullHistory: {""}, // refreshDispatchBaseline
 		},
 		captures: []string{
@@ -1312,7 +1340,7 @@ func TestServiceEditableMessengerKeepsWorkingMessageSeparateFromReply(t *testing
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			2000:                       {""},  // ensureSession baseline
+			2000:                       {""}, // ensureSession baseline
 			tmuxctl.CaptureFullHistory: {""}, // refreshDispatchBaseline
 		},
 		captures: []string{
@@ -1756,6 +1784,11 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 	defer cancel()
 
 	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {
+				"",
+			},
+		},
 		captures: []string{
 			"",
 			"• Working (1s • esc to interrupt)",
@@ -1778,7 +1811,7 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 	svc.pollEvery = 5 * time.Millisecond
 	svc.history = 2000
 	svc.startWait = 0
-	svc.workingAfter = 5 * time.Millisecond
+	svc.workingAfter = 0
 	svc.flushIdleTicks = 1
 
 	if err := svc.HandleMessage(context.Background(), IncomingMessage{
@@ -2316,6 +2349,8 @@ func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 		captures: []string{
 			"",
 			"• Working (1s • esc to interrupt)",
+			"• Working (2s • esc to interrupt)",
+			"• Working (3s • esc to interrupt)",
 			"• first",
 			"• first",
 			"• first",
@@ -3056,10 +3091,11 @@ func TestServicePollSkipsUnarmedOutputUntilFirstDispatch(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			2000: {"• stale one\n• stale two"},
+			2000:                       {"• stale one\n• stale two"},
+			200:                        {"• stale one\n• stale two\n› hello"},
+			tmuxctl.CaptureFullHistory: {"• stale one\n• stale two"},
 		},
 		captures: []string{
-			"• stale one\n• stale two",
 			"• stale one\n• stale two\n• Working (1s • esc to interrupt)",
 			"• stale one\n• stale two\n• fresh reply",
 			"• stale one\n• stale two\n• fresh reply",
@@ -3323,7 +3359,7 @@ func TestServiceFlushesBufferedReplyBeforeDispatchingNextMessage(t *testing.T) {
 
 	console := &fakeConsole{
 		capturesByHistory: map[int][]string{
-			2000:                       {""},  // ensureSession baseline (first dispatch)
+			2000:                       {""},     // ensureSession baseline (first dispatch)
 			tmuxctl.CaptureFullHistory: {"", ""}, // refreshDispatchBaseline (first + second dispatch)
 		},
 		captures: []string{
@@ -3678,6 +3714,729 @@ func TestServicePollResetMergesExistingBufferedTailInsteadOfReplacing(t *testing
 	}
 	if !strings.Contains(rt.outputBuffer, "• delta") {
 		t.Fatalf("outputBuffer = %q, want new reset delta merged", rt.outputBuffer)
+	}
+}
+
+func TestServicePollBusyInitialOutputDropsUnanchoredReplay(t *testing.T) {
+	t.Parallel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"• stale history one\n\n• stale history two\n\n• Working (1s • esc to interrupt)",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.flushIdleTicks = 100
+	svc.busyFlushAfter = time.Hour
+	svc.outputWatchdogAfter = 0
+
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		session:      svc.opts.SessionName,
+		sessionReady: true,
+		outputArmed:  true,
+		baseText:     "• old reply one\n\n• old reply two",
+		lastText:     "• old reply one\n\n• old reply two",
+		lastBusy:     true,
+		runID:        1,
+		active: &activeRequest{
+			messageID: "om_1",
+			input:     "fresh question",
+		},
+	}
+
+	svc.poll(rt)
+
+	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
+		t.Fatalf("outputBuffer = %q, want unanchored replay dropped", got)
+	}
+	if got := rt.baseText; got != "• stale history one\n\n• stale history two" {
+		t.Fatalf("baseText = %q, want current snapshot adopted as new anchor", got)
+	}
+}
+
+func TestServicePollDropsSuspiciousNearBaselineReplayEvenAfterBusySeen(t *testing.T) {
+	t.Parallel()
+
+	baseLines := make([]string, 0, 1600)
+	currLines := make([]string, 0, 1600)
+	for i := 0; i < 1600; i++ {
+		baseLines = append(baseLines, fmt.Sprintf("• old line %04d", i))
+		currLines = append(currLines, fmt.Sprintf("• old line %04d", i))
+	}
+	baseLines[len(baseLines)-2] = "• 在。说事。"
+	baseLines[len(baseLines)-1] = "  gpt-5.4 xhigh · ~/flow"
+	currLines[0] = "• stale search header"
+	currLines[len(currLines)-2] = "• 在。"
+	currLines[len(currLines)-1] = "  gpt-5.4 xhigh · ~/flow"
+
+	baseText := strings.Join(baseLines, "\n")
+	currFullText := strings.Join(currLines, "\n")
+	rawSnapshot := currFullText + "\n\n• Working (8s • esc to interrupt)"
+
+	console := &fakeConsole{
+		captures: []string{rawSnapshot},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.flushIdleTicks = 100
+	svc.busyFlushAfter = time.Hour
+	svc.outputWatchdogAfter = 0
+
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		session:      svc.opts.SessionName,
+		sessionReady: true,
+		outputArmed:  true,
+		baseText:     baseText,
+		lastText:     baseText,
+		lastBusy:     true,
+		runBusySeen:  true,
+		runID:        1,
+		active: &activeRequest{
+			messageID: "om_1",
+			input:     "看日志吧",
+		},
+		busySince: time.Now(),
+	}
+
+	svc.poll(rt)
+
+	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
+		t.Fatalf("outputBuffer = %q, want suspicious near-baseline replay dropped", got)
+	}
+	if got := rt.baseText; got != currFullText {
+		t.Fatalf("baseText = %q, want current snapshot adopted as anchor", got)
+	}
+	if rt.runBusySeen {
+		t.Fatal("runBusySeen = true, want stale busy evidence cleared")
+	}
+}
+
+func TestServicePollRecoversWindowDeltaFromSuspiciousNearBaselineReplay(t *testing.T) {
+	t.Parallel()
+
+	baseLines := make([]string, 0, 1600)
+	currLines := make([]string, 0, 1602)
+	for i := 0; i < 1600; i++ {
+		line := fmt.Sprintf("• old line %04d", i)
+		baseLines = append(baseLines, line)
+		currLines = append(currLines, line)
+	}
+	baseLines[len(baseLines)-2] = "• 在。"
+	baseLines[len(baseLines)-1] = "  gpt-5.4 xhigh · ~/flow"
+	currLines[len(currLines)-2] = "• 在。"
+	currLines[len(currLines)-1] = "• 我按你选的 1 继续，把这 4 份中文稿统一润色成更正式的对外文风。"
+	currLines = append(currLines, "  gpt-5.4 xhigh · ~/flow")
+
+	baseText := strings.Join(baseLines, "\n")
+	currFullText := strings.Join(currLines, "\n")
+	rawSnapshot := currFullText + "\n\n• Working (8s • esc to interrupt)"
+
+	console := &fakeConsole{
+		captures: []string{rawSnapshot},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.flushIdleTicks = 100
+	svc.busyFlushAfter = time.Hour
+	svc.outputWatchdogAfter = 0
+
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		session:      svc.opts.SessionName,
+		sessionReady: true,
+		outputArmed:  true,
+		baseText:     baseText,
+		lastText:     baseText,
+		lastBusy:     true,
+		runBusySeen:  true,
+		runID:        1,
+		active: &activeRequest{
+			messageID: "om_1",
+			input:     "1",
+		},
+		busySince: time.Now(),
+	}
+
+	svc.poll(rt)
+
+	if got := strings.Trim(rt.outputBuffer, "\n"); got != "• 我按你选的 1 继续，把这 4 份中文稿统一润色成更正式的对外文风。" {
+		t.Fatalf("outputBuffer = %q, want recovered new tail", got)
+	}
+	if got := rt.baseText; got != currFullText {
+		t.Fatalf("baseText = %q, want current snapshot adopted as anchor", got)
+	}
+}
+
+func TestServiceDoesNotReplayInitialBusyHistoryBurstAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			2000: {
+				"• old reply one\n\n• old reply two", // ensureSession baseline
+			},
+			tmuxctl.CaptureFullHistory: {
+				"• old reply one\n\n• old reply two", // refreshDispatchBaseline
+			},
+		},
+		captures: []string{
+			"", // first poll: silent-busy hold, no visible output yet
+			"• old reply one\n\n• old reply two\n\n• stale replay\n\n• Working (1s • esc to interrupt)",
+			"• old reply one\n\n• old reply two\n\n• stale replay\n\n• new reply final\n\n• Working (2s • esc to interrupt)",
+			"• old reply one\n\n• old reply two\n\n• stale replay\n\n• new reply final",
+			"• old reply one\n\n• old reply two\n\n• stale replay\n\n• new reply final",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.detachedSendEvery = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "fresh question",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "new reply final")
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if strings.Contains(joined, "old reply one") || strings.Contains(joined, "old reply two") || strings.Contains(joined, "stale replay") {
+		t.Fatalf("messages = %#v, want initial busy history burst excluded", messenger.all())
+	}
+	if !strings.Contains(joined, "new reply final") {
+		t.Fatalf("messages = %#v, want current reply forwarded", messenger.all())
+	}
+}
+
+func TestServiceDispatchResetsSessionWhenPreviousPromptPersists(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	foreignConfirms := make([]string, 32)
+	for i := range foreignConfirms {
+		foreignConfirms[i] = "• Working (8s • esc to interrupt)\n\n› Write tests for @filename\n\n  gpt-5.4 xhigh · ~/flow"
+	}
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			2000: {
+				"• old reply one\n\n• old reply two",
+			},
+			200: foreignConfirms,
+			tmuxctl.CaptureFullHistory: {
+				"• old reply one\n\n• old reply two",
+				"",
+			},
+		},
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• fresh reply final\n\n  gpt-5.4 xhigh · /srv/demo",
+			"• fresh reply final\n\n  gpt-5.4 xhigh · /srv/demo",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.idleConfirmTicks = 1
+	svc.detachedSendEvery = 0
+	svc.promptConfirmWait = 20 * time.Millisecond
+	svc.promptConfirmEvery = time.Millisecond
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "fresh question",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "fresh reply final")
+	})
+
+	if got := console.allResets(); len(got) != 1 {
+		t.Fatalf("len(resetSpecs) = %d, want 1 session reset", len(got))
+	}
+	if got := console.allSendTexts(); len(got) != 2 || got[0] != "fresh question" || got[1] != "fresh question" {
+		t.Fatalf("sendTexts = %#v, want original prompt retried after reset", got)
+	}
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if strings.Contains(joined, "old reply one") || strings.Contains(joined, "old reply two") || strings.Contains(joined, "Write tests for @filename") {
+		t.Fatalf("messages = %#v, want previous session output suppressed after reset", messenger.all())
+	}
+}
+
+func TestServiceDispatchWaitsForCurrentPromptEchoBeforeResetting(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			2000: {
+				"• old reply one\n\n• old reply two",
+			},
+			tmuxctl.CaptureFullHistory: {
+				"• old reply one\n\n• old reply two",
+			},
+			200: {
+				"• Working (8s • esc to interrupt)\n\n› Summarize recent commits\n\n  gpt-5.4 xhigh · ~/flow",
+				"• Working (8s • esc to interrupt)\n\n› fresh question\n\n› Summarize recent commits\n\n  gpt-5.4 xhigh · ~/flow",
+			},
+		},
+		captures: []string{
+			"• Working (1s • esc to interrupt)\n\n› fresh question",
+			"• fresh reply final\n\n  gpt-5.4 xhigh · /srv/demo",
+			"• fresh reply final\n\n  gpt-5.4 xhigh · /srv/demo",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.idleConfirmTicks = 1
+	svc.detachedSendEvery = 0
+	svc.promptConfirmWait = 30 * time.Millisecond
+	svc.promptConfirmEvery = 5 * time.Millisecond
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "fresh question",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "fresh reply final")
+	})
+
+	if got := console.allResets(); len(got) != 0 {
+		t.Fatalf("len(resetSpecs) = %d, want 0 session resets", len(got))
+	}
+	if got := console.allSendTexts(); len(got) != 1 || got[0] != "fresh question" {
+		t.Fatalf("sendTexts = %#v, want prompt sent once without reset retry", got)
+	}
+}
+
+func TestSnapshotContainsPromptEchoFindsCurrentPromptAboveStarterSuggestion(t *testing.T) {
+	t.Parallel()
+
+	snapshot := "╭─────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.120.0)                  │\n╰─────────────────────────────────────────────╯\n\nTip: New Build faster with Codex.\n\n› fresh question\n\n◦ Working (0s • esc to interrupt)\n\n› Summarize recent commits\n\n  gpt-5.4 xhigh · ~/flow"
+	if !snapshotContainsPromptEcho(snapshot, "fresh question") {
+		t.Fatalf("snapshotContainsPromptEcho() = false, want true for current prompt above starter suggestion")
+	}
+}
+
+func TestSnapshotContainsPromptEchoDoesNotFalseMatchShortHistoricPrompt(t *testing.T) {
+	t.Parallel()
+
+	snapshot := "› 在吗？\n\n• 在。\n\n› 在？\n\n• 在。\n\n› Find and fix a bug in @filename\n\n  gpt-5.4 xhigh · ~/flow"
+	if snapshotContainsPromptEcho(snapshot, "在") {
+		t.Fatalf("snapshotContainsPromptEcho() = true, want false for short prompt that only appears inside older longer prompts")
+	}
+}
+
+func TestAnchoredRunOutputDeltaSkipsAlreadyVisibleReply(t *testing.T) {
+	t.Parallel()
+
+	snapshot := "• historical reply\n\n› 在\n\n• 在。你直接试。\n\n• 新的一句。\n\n  gpt-5.4 xhigh · ~/flow"
+	delta, ok := anchoredRunOutputDelta(snapshot, "在", "", "• 在。你直接试。")
+	if !ok {
+		t.Fatalf("anchoredRunOutputDelta() = not anchored, want anchored")
+	}
+	if got, want := delta, "• 新的一句。"; got != want {
+		t.Fatalf("anchoredRunOutputDelta() = %q, want %q", got, want)
+	}
+}
+
+func TestServiceDoesNotReplayHistoryWhenPromptEchoAppearsInsideInitialWindow(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			2000: {
+				"• old reply one\n\n• old reply two",
+			},
+			tmuxctl.CaptureFullHistory: {
+				"• old reply one\n\n• old reply two",
+			},
+		},
+		captures: []string{
+			"",
+			"• Working (1s • esc to interrupt)",
+			"• old reply one\n\n• old reply two\n\n› fresh question",
+			"• old reply one\n\n• old reply two\n\n› fresh question\n\n• new reply final",
+			"• old reply one\n\n• old reply two\n\n› fresh question\n\n• new reply final",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.detachedSendEvery = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "fresh question",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "new reply final")
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if strings.Contains(joined, "old reply one") || strings.Contains(joined, "old reply two") {
+		t.Fatalf("messages = %#v, want history before prompt echo excluded", messenger.all())
+	}
+	if strings.Contains(joined, "fresh question") {
+		t.Fatalf("messages = %#v, want prompt echo excluded", messenger.all())
+	}
+	if !strings.Contains(joined, "new reply final") {
+		t.Fatalf("messages = %#v, want current reply forwarded", messenger.all())
+	}
+}
+
+func TestServiceDoesNotReplayLargeBaselineRewriteAfterRestartWhenPromptEchoObserved(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	oldBlock := strings.TrimSpace(strings.Repeat("• historical reply line\n", 260))
+	confirmSnapshot := oldBlock + "\n\n◦ Working (0s • esc to interrupt)\n\n› fresh question\n\n› Use /skills to list available skills\n\n  gpt-5.4 xhigh · ~/flow"
+	pollSnapshot := oldBlock + "\n\n◦ Working (1s • esc to interrupt)\n\n› fresh question\n\n• fresh reply final\n\n  gpt-5.4 xhigh · ~/flow"
+	finalSnapshot := oldBlock + "\n\n• fresh reply final\n\n  gpt-5.4 xhigh · ~/flow"
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			2000: {
+				oldBlock,
+			},
+			200: {
+				confirmSnapshot,
+			},
+			tmuxctl.CaptureFullHistory: {
+				oldBlock,
+			},
+		},
+		captures: []string{
+			pollSnapshot,
+			finalSnapshot,
+			finalSnapshot,
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.idleConfirmTicks = 1
+	svc.detachedSendEvery = 0
+	svc.promptConfirmWait = 20 * time.Millisecond
+	svc.promptConfirmEvery = time.Millisecond
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "fresh question",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "fresh reply final")
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if !strings.Contains(joined, "fresh reply final") {
+		t.Fatalf("messages = %#v, want fresh reply delivered", messenger.all())
+	}
+	if strings.Contains(joined, "historical reply line") {
+		t.Fatalf("messages = %#v, want baseline history suppressed", messenger.all())
+	}
+}
+
+func TestServiceDoesNotReplayCompactedHistoryBeforeCurrentPromptAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	oldBlock := strings.TrimSpace(strings.Repeat("• historical reply line\n", 260))
+	baseline := oldBlock + "\n\n• earlier reply"
+	confirmSnapshot := "• Context compacted\n\n› 在\n\n◦ Working (0s • esc to interrupt)\n\n  gpt-5.4 xhigh · ~/flow"
+	pollSnapshot := "• Context compacted\n\n" + baseline + "\n\n› 在\n\n• fresh reply final\n\n  gpt-5.4 xhigh · ~/flow"
+	finalSnapshot := "• Context compacted\n\n" + baseline + "\n\n• fresh reply final\n\n  gpt-5.4 xhigh · ~/flow"
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			2000: {
+				baseline,
+			},
+			200: {
+				confirmSnapshot,
+			},
+			tmuxctl.CaptureFullHistory: {
+				baseline,
+			},
+		},
+		captures: []string{
+			pollSnapshot,
+			finalSnapshot,
+			finalSnapshot,
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.idleConfirmTicks = 1
+	svc.detachedSendEvery = 0
+	svc.promptConfirmWait = 20 * time.Millisecond
+	svc.promptConfirmEvery = time.Millisecond
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "在",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "fresh reply final")
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if !strings.Contains(joined, "fresh reply final") {
+		t.Fatalf("messages = %#v, want fresh reply delivered", messenger.all())
+	}
+	if strings.Contains(joined, "historical reply line") || strings.Contains(joined, "earlier reply") || strings.Contains(joined, "Context compacted") {
+		t.Fatalf("messages = %#v, want compacted history before current prompt suppressed", messenger.all())
+	}
+}
+
+func TestServiceDoesNotReplayHistoryOnNextPollAfterAnchoredReplyWithEmptyBaseline(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	oldBlock := strings.TrimSpace(strings.Repeat("• historical reply line\n", 260))
+	firstSnapshot := oldBlock + "\n\n› fresh question\n\n• fresh reply final\n\n  gpt-5.4 xhigh · ~/flow"
+	finalSnapshot := oldBlock + "\n\n• fresh reply final\n\n  gpt-5.4 xhigh · ~/flow"
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			2000: {
+				"",
+			},
+			tmuxctl.CaptureFullHistory: {
+				"",
+			},
+		},
+		captures: []string{
+			firstSnapshot,
+			finalSnapshot,
+			finalSnapshot,
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.idleConfirmTicks = 1
+	svc.detachedSendEvery = 0
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "fresh question",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "fresh reply final")
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if !strings.Contains(joined, "fresh reply final") {
+		t.Fatalf("messages = %#v, want fresh reply delivered", messenger.all())
+	}
+	if strings.Contains(joined, "historical reply line") {
+		t.Fatalf("messages = %#v, want historical replay suppressed on follow-up poll", messenger.all())
+	}
+}
+
+func TestServiceDoesNotReplayHistoryOnNextPollAfterAnchoredReplyWithExistingBaseline(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	oldBlock := strings.TrimSpace(strings.Repeat("• historical reply line\n", 260))
+	firstSnapshot := oldBlock + "\n\n› fresh question\n\n• fresh reply final\n\n  gpt-5.4 xhigh · ~/flow"
+	finalSnapshot := oldBlock + "\n\n• fresh reply final\n\n  gpt-5.4 xhigh · ~/flow"
+
+	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			2000: {
+				oldBlock,
+			},
+			200: {
+				firstSnapshot,
+			},
+			tmuxctl.CaptureFullHistory: {
+				oldBlock,
+			},
+		},
+		captures: []string{
+			firstSnapshot,
+			finalSnapshot,
+			finalSnapshot,
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.editableSyncEvery = 5 * time.Millisecond
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.idleConfirmTicks = 1
+	svc.detachedSendEvery = 0
+	svc.promptConfirmWait = 20 * time.Millisecond
+	svc.promptConfirmEvery = time.Millisecond
+
+	if err := svc.HandleMessage(context.Background(), IncomingMessage{
+		MessageID: "om_1",
+		GroupID:   "oc_1",
+		Text:      "fresh question",
+	}); err != nil {
+		t.Fatalf("HandleMessage() error = %v", err)
+	}
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "fresh reply final")
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if !strings.Contains(joined, "fresh reply final") {
+		t.Fatalf("messages = %#v, want fresh reply delivered", messenger.all())
+	}
+	if strings.Contains(joined, "historical reply line") {
+		t.Fatalf("messages = %#v, want historical replay suppressed on follow-up poll", messenger.all())
+	}
+}
+
+func TestServiceIgnoresStaleEditableDeliveryCompletionAfterNewDispatch(t *testing.T) {
+	t.Parallel()
+
+	sendBlock := make(chan struct{})
+	messenger := &fakeEditableMessenger{
+		sendBlock: sendBlock,
+		sendErrs: []error{
+			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 23 retry_after=23"),
+		},
+	}
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, nil, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		deliveryDone:     make(chan deliveryCompletion, 1),
+		runID:            1,
+		nextRunID:        1,
+		outputBuffer:     "old buffered body",
+		outputBufferedAt: time.Now(),
+	}
+
+	svc.flushOutputBuffer(rt)
+	if !rt.deliveryInFlight {
+		t.Fatalf("deliveryInFlight = false, want old editable delivery started")
+	}
+
+	svc.prepareOutputForDispatch(rt)
+	rt.runID = 2
+	rt.nextRunID = 2
+	rt.outputBuffer = "new buffered body"
+	rt.outputBufferedAt = time.Now()
+
+	close(sendBlock)
+	completion := <-rt.deliveryDone
+	rt.deliveryInFlight = false
+	completion.apply()
+
+	if got := rt.outputBuffer; got != "new buffered body" {
+		t.Fatalf("outputBuffer = %q, want stale completion ignored", got)
+	}
+	if !rt.outputBackoffUntil.IsZero() {
+		t.Fatalf("outputBackoffUntil = %v, want no stale backoff applied", rt.outputBackoffUntil)
+	}
+	if !rt.editBackoffUntil.IsZero() {
+		t.Fatalf("editBackoffUntil = %v, want no stale editable backoff applied", rt.editBackoffUntil)
 	}
 }
 
