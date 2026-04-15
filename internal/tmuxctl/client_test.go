@@ -120,6 +120,7 @@ func TestDefaultLaunchCommandUsesNeverApprovalAndDangerFullAccess(t *testing.T) 
 
 	got := defaultLaunchCommand(SessionSpec{CWD: "/srv/demo"})
 	for _, want := range []string{
+		`IMCODEX_MANAGED_CODEX_HOME=`,
 		`'codex' 'resume' '--last' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C' '/srv/demo'`,
 		`if [ "$CODEX_RESUME_STATUS" -eq 0 ]; then exit 0; fi`,
 		`exec 'codex' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C' '/srv/demo'`,
@@ -276,6 +277,135 @@ esac
 	logText := string(logData)
 	if !strings.Contains(logText, "capture-pane -pJ -S - -t %42") {
 		t.Fatalf("tmux log = %q, want full-history capture-pane invocation", logText)
+	}
+}
+
+func TestClientResetSessionStartsFreshWhenUsingDefaultLaunch(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	countPath := filepath.Join(dir, "has-session.count")
+	scriptPath := filepath.Join(dir, "tmux")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+case "$1" in
+  has-session)
+    count=0
+    if [ -f %s ]; then
+      count=$(cat %s)
+    fi
+    count=$((count + 1))
+    printf '%%s' "$count" > %s
+    if [ "$count" -eq 1 ]; then
+      exit 0
+    fi
+    if [ "$count" -eq 2 ]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  kill-session)
+    exit 0
+    ;;
+  new-session)
+    printf '%%%%42\n'
+    ;;
+  set-option)
+    exit 0
+    ;;
+  show-options)
+    printf '%%%%42\n'
+    ;;
+  display-message)
+    printf '%%%%42\n'
+    ;;
+  capture-pane)
+    printf 'ready\n›\n'
+    ;;
+esac
+`, shellQuote(logPath), shellQuote(countPath), shellQuote(countPath), shellQuote(countPath))
+	writeExecutableScript(t, scriptPath, script)
+
+	client := New()
+	client.bin = scriptPath
+	client.enterWait = 0
+
+	_, err := client.ResetSession(context.Background(), SessionSpec{
+		SessionName: "demo",
+		CWD:         dir,
+		StartupWait: 0,
+	})
+	if err != nil {
+		t.Fatalf("ResetSession() error = %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "kill-session -t demo") {
+		t.Fatalf("tmux log = %q, want session killed before recreate", logText)
+	}
+	if !strings.Contains(logText, `new-session -d -P -F #{pane_id} -s demo -n imcodex IMCODEX_SOURCE_CODEX_HOME=${CODEX_HOME:-"${HOME}/.codex"}`) {
+		t.Fatalf("tmux log = %q, want managed home bootstrap on reset", logText)
+	}
+	if !strings.Contains(logText, "exec 'codex' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C'") {
+		t.Fatalf("tmux log = %q, want fresh codex launch on reset", logText)
+	}
+	if strings.Contains(logText, "resume --last") {
+		t.Fatalf("tmux log = %q, want reset path to skip resume", logText)
+	}
+}
+
+func TestClientWaitForPromptDoesNotTreatTrustPromptAsReady(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux.log")
+	scriptPath := filepath.Join(dir, "tmux")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+case "$1" in
+  has-session)
+    exit 0
+    ;;
+  show-options)
+    printf '%%%%42\n'
+    ;;
+  display-message)
+    printf '%%%%42\n'
+    ;;
+  capture-pane)
+    cat <<'EOF'
+> You are in /srv/demo
+
+  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue
+EOF
+    ;;
+esac
+`, shellQuote(logPath))
+	writeExecutableScript(t, scriptPath, script)
+
+	client := New()
+	client.bin = scriptPath
+
+	err := client.waitForPrompt(context.Background(), SessionSpec{
+		SessionName:                 "demo",
+		AutoPressEnterOnTrustPrompt: true,
+	}, 300*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("waitForPrompt() error = %v, want timeout on trust prompt", err)
+	}
+
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile() error = %v", readErr)
+	}
+	if strings.Contains(string(logData), "send-keys -t %42 Enter") {
+		t.Fatalf("tmux log = %q, want trust prompt to avoid synthetic Enter submission", string(logData))
 	}
 }
 

@@ -219,7 +219,7 @@ func trimLeadingStatusGlyphs(line string) string {
 func looksLikeModelStatusLine(line string) bool {
 	line = strings.TrimSpace(line)
 	lower := strings.ToLower(line)
-	if !strings.Contains(line, "% left ·") {
+	if !strings.Contains(line, "·") {
 		return false
 	}
 	if !strings.Contains(line, "· /") && !strings.Contains(line, "· ~/") {

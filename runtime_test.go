@@ -105,12 +105,12 @@ func TestDockerContainerNamePrefersSession(t *testing.T) {
 func TestDockerCodexEntrypointScriptCopiesConfigAndDropsPrivileges(t *testing.T) {
 	t.Parallel()
 
-	script := dockerCodexEntrypointScript()
+	script := dockerCodexEntrypointScript("demo-session")
 	for _, want := range []string{
 		"cp -a /config-ro/.",
 		"chown -R 'agent:agent' '/home/agent'",
 		`exec su-exec 'agent' sh -lc `,
-		shellQuote(codexcmd.LaunchCommand(dockerWorkspaceDir)),
+		shellQuote(codexcmd.LaunchCommandForSession(dockerWorkspaceDir, "demo-session")),
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("entrypoint = %q, want substring %q", script, want)

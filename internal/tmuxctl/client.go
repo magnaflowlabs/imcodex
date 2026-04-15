@@ -23,11 +23,11 @@ const (
 	// allocation on long-running sessions.
 	CaptureRecoveryHistory = 5000
 	controlPaneOption      = "@imcodex-control-pane"
-	controlPaneRole    = "@imcodex-pane-role"
-	controlWindowName  = "imcodex"
-	readyPollEvery     = 250 * time.Millisecond
-	hostReadyWait      = 30 * time.Second
-	dockerReadyWait    = 2 * time.Minute
+	controlPaneRole        = "@imcodex-pane-role"
+	controlWindowName      = "imcodex"
+	readyPollEvery         = 250 * time.Millisecond
+	hostReadyWait          = 30 * time.Second
+	dockerReadyWait        = 2 * time.Minute
 )
 
 type SessionSpec struct {
@@ -96,9 +96,27 @@ func (c *Client) EnsureSession(ctx context.Context, spec SessionSpec) (bool, err
 	return created, nil
 }
 
+func (c *Client) ResetSession(ctx context.Context, spec SessionSpec) (bool, error) {
+	if err := validateWorkingDirectory(spec.CWD); err != nil {
+		return false, err
+	}
+	ok, err := c.hasSession(ctx, spec.SessionName)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		if err := c.run(ctx, "kill-session", "-t", spec.SessionName); err != nil && !strings.Contains(err.Error(), "can't find session") {
+			return false, fmt.Errorf("kill tmux session: %w", err)
+		}
+	}
+	if strings.TrimSpace(spec.LaunchCommand) == "" {
+		spec.LaunchCommand = codexcmd.FreshLaunchCommandForSession(spec.CWD, spec.SessionName)
+	}
+	return c.EnsureSession(ctx, spec)
+}
+
 func (c *Client) waitForPrompt(ctx context.Context, spec SessionSpec, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	lastTrustEnter := time.Time{}
 	for {
 		if ok, err := c.hasSession(ctx, spec.SessionName); err != nil {
 			return err
@@ -108,13 +126,10 @@ func (c *Client) waitForPrompt(ctx context.Context, spec SessionSpec, timeout ti
 
 		snapshot, err := c.Capture(ctx, spec.SessionName, 120)
 		if err == nil {
-			if spec.AutoPressEnterOnTrustPrompt && IsTrustPrompt(snapshot) && time.Since(lastTrustEnter) >= time.Second {
-				if err := c.sendKey(ctx, spec.SessionName, "Enter"); err != nil {
-					return err
-				}
-				lastTrustEnter = time.Now()
-			}
-			if _, hasPrompt := InputStatusSlot(snapshot); hasPrompt {
+			if IsTrustPrompt(snapshot) {
+				// Do not auto-submit Enter here. Codex records the trust selection
+				// as a real prompt "1", which pollutes the managed session.
+			} else if _, hasPrompt := InputStatusSlot(snapshot); hasPrompt {
 				return nil
 			}
 		}
@@ -422,7 +437,7 @@ func (c *Client) command(spec SessionSpec) string {
 }
 
 func defaultLaunchCommand(spec SessionSpec) string {
-	return codexcmd.LaunchCommand(spec.CWD)
+	return codexcmd.LaunchCommandForSession(spec.CWD, spec.SessionName)
 }
 
 func expandLaunchCommandTemplate(template string, spec SessionSpec) string {

@@ -130,6 +130,17 @@ func TestNormalizeSnapshotDropsHollowBulletWorkingChrome(t *testing.T) {
 	}
 }
 
+func TestNormalizeSnapshotDropsModelStatusWithoutPercent(t *testing.T) {
+	t.Parallel()
+
+	raw := "• final answer\n\n› Improve documentation in @filename\n\n  gpt-5.4 xhigh · ~/repo"
+	got := NormalizeSnapshot(raw)
+	want := "• final answer"
+	if got != want {
+		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, want)
+	}
+}
+
 func TestIsBusyRecognizesHollowBulletWorkingChrome(t *testing.T) {
 	t.Parallel()
 

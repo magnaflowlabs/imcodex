@@ -254,17 +254,17 @@ func buildDockerRunArgs(image string, workspace string, session string, configDi
 	if configDir != "" {
 		args = append(args, "--mount", fmt.Sprintf("type=bind,src=%s,dst=/config-ro,readonly", configDir))
 	}
-	args = append(args, image, "sh", "-lc", dockerCodexEntrypointScript())
+	args = append(args, image, "sh", "-lc", dockerCodexEntrypointScript(session))
 	return args
 }
 
-func dockerCodexEntrypointScript() string {
+func dockerCodexEntrypointScript(session string) string {
 	configHome := dockerAgentHome + "/.codex"
 	return "set -eu; " +
 		"mkdir -p " + shellQuote(configHome) + "; " +
 		"if [ -d /config-ro ]; then cp -a /config-ro/. " + shellQuote(configHome) + "/; fi; " +
 		"chown -R " + shellQuote(dockerAgentUser+":"+dockerAgentUser) + " " + shellQuote(dockerAgentHome) + "; " +
-		"exec su-exec " + shellQuote(dockerAgentUser) + " sh -lc " + shellQuote(codexcmd.LaunchCommand(dockerWorkspaceDir))
+		"exec su-exec " + shellQuote(dockerAgentUser) + " sh -lc " + shellQuote(codexcmd.LaunchCommandForSession(dockerWorkspaceDir, session))
 }
 
 func dockerContainerName(session string, workspace string) string {

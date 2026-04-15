@@ -38,6 +38,8 @@ const (
 	detachedCatchUpSendEvery   = time.Second
 	defaultDeliveryTimeout     = 20 * time.Second
 	defaultSilentBusyGrace     = 20 * time.Minute
+	defaultPromptConfirmWait   = 500 * time.Millisecond
+	defaultPromptConfirmEvery  = 50 * time.Millisecond
 	outputWatchdogLogEvery     = 5 * time.Second
 	outputTraceLogEvery        = 5 * time.Second
 	severeEditRetryAfter       = 30 * time.Second
@@ -96,6 +98,7 @@ type ActionMessenger interface {
 
 type Console interface {
 	EnsureSession(ctx context.Context, spec tmuxctl.SessionSpec) (bool, error)
+	ResetSession(ctx context.Context, spec tmuxctl.SessionSpec) (bool, error)
 	SendText(ctx context.Context, session string, text string) error
 	Capture(ctx context.Context, session string, history int) (string, error)
 	Interrupt(ctx context.Context, session string) error
@@ -130,6 +133,8 @@ type Service struct {
 	deliveryTimeout       time.Duration
 	silentBusyGrace       time.Duration
 	interruptForceAfter   time.Duration
+	promptConfirmWait     time.Duration
+	promptConfirmEvery    time.Duration
 
 	mu      sync.Mutex
 	runtime *groupRuntime
@@ -189,6 +194,7 @@ type groupRuntime struct {
 	interruptSentAt      time.Time
 	forceInterruptSent   bool
 	deliveryInFlight     bool
+	outputGeneration     uint64
 	runID                uint64
 	nextRunID            uint64
 	runCursorCommitted   map[uint64]int
@@ -249,6 +255,8 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		deliveryTimeout:       defaultDeliveryTimeout,
 		silentBusyGrace:       defaultSilentBusyGrace,
 		interruptForceAfter:   time.Second,
+		promptConfirmWait:     defaultPromptConfirmWait,
+		promptConfirmEvery:    defaultPromptConfirmEvery,
 	}
 }
 
@@ -426,14 +434,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		!rt.detachedBackoffUntil.IsZero() ||
 		!rt.editBackoffUntil.IsZero()
 
-	_, err := s.console.EnsureSession(s.ctx, tmuxctl.SessionSpec{
-		SessionName:                 rt.session,
-		CWD:                         rt.opts.CWD,
-		GroupID:                     rt.opts.GroupID,
-		LaunchCommand:               rt.opts.LaunchCommand,
-		StartupWait:                 s.startWait,
-		AutoPressEnterOnTrustPrompt: true,
-	})
+	_, err := s.console.EnsureSession(s.ctx, s.sessionSpec(rt))
 	if err != nil {
 		return err
 	}
@@ -609,6 +610,10 @@ func (s *Service) finalizeOutputBeforeDispatch(rt *groupRuntime) bool {
 }
 
 func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
+	return s.dispatchPreparedAttempt(rt, req, false)
+}
+
+func (s *Service) dispatchPreparedAttempt(rt *groupRuntime, req *activeRequest, retried bool) error {
 	if req == nil {
 		return errors.New("active request is nil")
 	}
@@ -616,6 +621,59 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 	s.prepareOutputForDispatch(rt)
 	if err := s.console.SendText(s.ctx, rt.session, req.input); err != nil {
 		return err
+	}
+	if strings.TrimSpace(baseline) != "" {
+		accepted, foreignPrompt, err := s.confirmPromptAccepted(rt, req.input)
+		if err != nil {
+			return err
+		}
+		if !accepted && foreignPrompt != "" {
+			if retried {
+				return fmt.Errorf("codex session kept previous prompt %q after reset", foreignPrompt)
+			}
+			s.logger.Warn(
+				"codex prompt not accepted; resetting session",
+				"group_id", rt.opts.GroupID,
+				"session", rt.session,
+				"foreign_prompt", foreignPrompt,
+			)
+			if _, err := s.console.ResetSession(s.ctx, s.sessionSpec(rt)); err != nil {
+				return fmt.Errorf("reset codex session: %w", err)
+			}
+			rt.sessionReady = true
+			rt.baseText = ""
+			rt.lastText = ""
+			rt.lastBusy = false
+			rt.idleTicks = 0
+			rt.outputArmed = false
+			rt.promptEchoTail = ""
+			rt.promptEchoPending = false
+			rt.runBusySeen = false
+			rt.runPromptObserved = false
+			rt.clearPreBusyMutedState()
+			rt.clearOutputBuffer()
+			rt.outputText = ""
+			rt.outputMessages = nil
+			rt.statusMessage = trackedMessage{}
+			rt.detachedOutputs = nil
+			rt.outputBackoffUntil = time.Time{}
+			rt.detachedBackoffUntil = time.Time{}
+			rt.detachedRetryCount = 0
+			rt.editBackoffUntil = time.Time{}
+			rt.editRateLimitCount = 0
+			rt.deferBodyUntilIdle = false
+			rt.forcePlainOutput = false
+			rt.busySince = time.Time{}
+			rt.workingSent = false
+			rt.workingBackoffUntil = time.Time{}
+			rt.lastActionAt = time.Time{}
+			rt.interruptSentAt = time.Time{}
+			rt.forceInterruptSent = false
+			return s.dispatchPreparedAttempt(rt, req, true)
+		}
+		if accepted {
+			rt.runPromptObserved = true
+		}
 	}
 	rt.baseText = baseline
 	rt.lastBusy = true
@@ -652,6 +710,79 @@ func (s *Service) dispatchPrepared(rt *groupRuntime, req *activeRequest) error {
 		"cursor", rt.runCursor(rt.runID),
 	)
 	return nil
+}
+
+func (s *Service) sessionSpec(rt *groupRuntime) tmuxctl.SessionSpec {
+	if rt == nil {
+		return tmuxctl.SessionSpec{}
+	}
+	return tmuxctl.SessionSpec{
+		SessionName:                 rt.session,
+		CWD:                         rt.opts.CWD,
+		GroupID:                     rt.opts.GroupID,
+		LaunchCommand:               rt.opts.LaunchCommand,
+		StartupWait:                 s.startWait,
+		AutoPressEnterOnTrustPrompt: false,
+	}
+}
+
+func (s *Service) confirmPromptAccepted(rt *groupRuntime, input string) (bool, string, error) {
+	if rt == nil {
+		return false, "", errors.New("group runtime is nil")
+	}
+	firstLine := promptFirstLine(input)
+	if firstLine == "" {
+		return true, "", nil
+	}
+	wait := s.promptConfirmWait
+	if wait <= 0 {
+		return true, "", nil
+	}
+	every := s.promptConfirmEvery
+	if every <= 0 {
+		every = defaultPromptConfirmEvery
+	}
+	history := s.history
+	if history <= 0 || history > 200 {
+		history = 200
+	}
+	if every > wait {
+		every = wait
+	}
+	deadline := time.Now().Add(wait)
+	foreignPrompt := ""
+	for {
+		sleepFor := every
+		if remaining := time.Until(deadline); sleepFor > remaining {
+			sleepFor = remaining
+		}
+		if sleepFor > 0 {
+			select {
+			case <-s.ctx.Done():
+				return false, "", s.ctx.Err()
+			case <-time.After(sleepFor):
+			}
+		}
+		snapshot, err := s.console.Capture(s.ctx, rt.session, history)
+		if err != nil {
+			return false, "", fmt.Errorf("confirm prompt acceptance: %w", err)
+		}
+		if snapshotContainsPromptEcho(snapshot, input) {
+			return true, "", nil
+		}
+		if candidate, foreign := latestPromptBody(snapshot); foreign && !promptBodiesMatch(candidate, firstLine) {
+			foreignPrompt = candidate
+		} else {
+			return true, "", nil
+		}
+		if time.Now().After(deadline) || time.Now().Equal(deadline) {
+			break
+		}
+	}
+	if foreignPrompt != "" {
+		return false, foreignPrompt, nil
+	}
+	return true, "", nil
 }
 
 func (s *Service) refreshDispatchBaseline(rt *groupRuntime) string {
@@ -700,8 +831,43 @@ func (s *Service) poll(rt *groupRuntime) {
 	busyRaw := tmuxctl.IsBusy(snapshot)
 	prevText := tmuxctl.SliceAfter(rt.baseText, rt.lastText)
 	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
+	snapshotPromptObserved := false
+	prevPromptBlockObserved := false
+	currPromptBlockObserved := false
+	adoptAnchoredSnapshotBaseline := false
+	if rt.active != nil {
+		var consumed bool
+		prevText, consumed = suppressPromptEchoBlock(prevText, rt.active.input, rt.promptEchoTail)
+		if consumed {
+			prevPromptBlockObserved = true
+			rt.runPromptObserved = true
+		}
+		currText, consumed = suppressPromptEchoBlock(currText, rt.active.input, rt.promptEchoTail)
+		if consumed {
+			currPromptBlockObserved = true
+			rt.runPromptObserved = true
+			rt.promptEchoPending = false
+		}
+	}
 	if rt.active != nil && snapshotContainsPromptEcho(snapshot, rt.active.input) {
+		snapshotPromptObserved = true
 		rt.runPromptObserved = true
+		if strings.TrimSpace(prevText) == "" &&
+			strings.TrimSpace(currText) != "" {
+			visibleRunOutput := mergeBufferedOutput(rt.publishedOutputText(), rt.outputBuffer)
+			if anchoredText, anchored := anchoredRunOutputDelta(snapshot, rt.active.input, rt.promptEchoTail, visibleRunOutput); anchored {
+				currText = anchoredText
+				currPromptBlockObserved = true
+				rt.promptEchoPending = false
+			}
+		}
+	}
+	if rt.outputArmed &&
+		rt.active != nil &&
+		strings.TrimSpace(prevText) == "" &&
+		(strings.TrimSpace(currText) != "" || hasVisibleRunOutput(rt, "")) &&
+		(currPromptBlockObserved || snapshotPromptObserved) {
+		adoptAnchoredSnapshotBaseline = true
 	}
 	if rt.promptEchoPending {
 		prevText, _ = suppressPromptEchoPrefix(prevText, rt.promptEchoTail)
@@ -713,6 +879,47 @@ func (s *Service) poll(rt *groupRuntime) {
 		if consumed || strings.TrimSpace(currText) != "" {
 			rt.promptEchoPending = false
 		}
+	}
+	unanchoredInitialBusyOutput := rt.outputArmed &&
+		rt.active != nil &&
+		busyRaw &&
+		!rt.runBusySeen &&
+		!rt.runPromptObserved &&
+		strings.TrimSpace(prevText) == "" &&
+		strings.TrimSpace(currText) != "" &&
+		!hasVisibleRunOutput(rt, "")
+	suspiciousNearBaselineReplay := rt.outputArmed &&
+		rt.active != nil &&
+		strings.TrimSpace(prevText) == "" &&
+		strings.TrimSpace(currText) != "" &&
+		!hasVisibleRunOutput(rt, "") &&
+		suspiciousInitialWindowReplay(rt, currFullText, currText)
+	recoveredWindowDelta := ""
+	if suspiciousNearBaselineReplay {
+		recoveredWindowDelta = recoverWindowRewriteDelta(rt.lastText, currFullText)
+	}
+	if unanchoredInitialBusyOutput || (suspiciousNearBaselineReplay && strings.TrimSpace(recoveredWindowDelta) == "") {
+		s.logInitialReplayDiagnostic(rt, snapshot, snapshotPromptObserved, prevPromptBlockObserved, currPromptBlockObserved, currFullText, prevText, currText)
+		rt.baseText = currFullText
+		rt.lastText = currFullText
+		if suspiciousNearBaselineReplay {
+			rt.runBusySeen = false
+			busyRaw = false
+		}
+		prevText = ""
+		s.logger.Warn(
+			"dropping unanchored initial busy output",
+			"group_id", rt.opts.GroupID,
+			"run_id", rt.runID,
+			"curr_len", utf8.RuneCountInString(strings.Trim(currText, "\n")),
+		)
+		currText = ""
+	}
+	if suspiciousNearBaselineReplay && strings.TrimSpace(recoveredWindowDelta) != "" {
+		s.logInitialReplayDiagnostic(rt, snapshot, snapshotPromptObserved, prevPromptBlockObserved, currPromptBlockObserved, currFullText, prevText, currText)
+		rt.baseText = currFullText
+		prevText = ""
+		currText = recoveredWindowDelta
 	}
 	idleConfirmTicks := s.idleConfirmTicks
 	if idleConfirmTicks <= 0 {
@@ -737,6 +944,10 @@ func (s *Service) poll(rt *groupRuntime) {
 			rt.preBusyMutedStable++
 		}
 	}
+	if adoptAnchoredSnapshotBaseline {
+		rt.baseText = currFullText
+		rt.lastText = currFullText
+	}
 	heldSilentBusy := false
 	if !busyRaw &&
 		!(rt.active != nil && !rt.runBusySeen && strings.TrimSpace(rt.preBusyMutedText) != "") &&
@@ -745,6 +956,12 @@ func (s *Service) poll(rt *groupRuntime) {
 		heldSilentBusy = true
 	}
 	if rt.outputArmed && (strings.TrimSpace(delta) != "" || reset || heldSilentBusy) {
+		if rt.active != nil &&
+			strings.TrimSpace(prevText) == "" &&
+			strings.TrimSpace(currText) != "" &&
+			utf8.RuneCountInString(strings.Trim(currText, "\n")) >= 4000 {
+			s.logInitialReplayDiagnostic(rt, snapshot, snapshotPromptObserved, prevPromptBlockObserved, currPromptBlockObserved, currFullText, prevText, currText)
+		}
 		s.logOutputTrace(
 			rt,
 			"poll observed output",
@@ -1050,6 +1267,143 @@ func suppressPromptEchoPrefix(text string, echoTail string) (string, bool) {
 	return text, false
 }
 
+func suppressPromptEchoBlock(text string, input string, echoTail string) (string, bool) {
+	text = strings.TrimLeft(text, "\n")
+	input = strings.ReplaceAll(input, "\r\n", "\n")
+	input = strings.TrimSpace(input)
+	if text == "" || input == "" {
+		return text, false
+	}
+
+	lines := strings.Split(text, "\n")
+	firstLine := strings.TrimSpace(strings.Split(input, "\n")[0])
+	if firstLine == "" {
+		return text, false
+	}
+
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(strings.TrimRight(lines[i], " \t\r"))
+		if !strings.HasPrefix(line, "›") && !strings.HasPrefix(line, ">") {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "›"), ">"))
+		if !promptBodiesMatch(body, firstLine) {
+			continue
+		}
+		end := promptEchoBlockEnd(lines, i, echoTail)
+		return strings.TrimLeft(strings.Join(lines[end+1:], "\n"), "\n"), true
+	}
+	return text, false
+}
+
+func normalizedSnapshotAfterPromptEcho(snapshot string, input string, echoTail string) (string, bool) {
+	snapshot = strings.ReplaceAll(snapshot, "\r\n", "\n")
+	input = strings.ReplaceAll(input, "\r\n", "\n")
+	input = strings.TrimSpace(input)
+	if snapshot == "" || input == "" {
+		return "", false
+	}
+
+	lines := strings.Split(snapshot, "\n")
+	firstLine := promptFirstLine(input)
+	if firstLine == "" {
+		return "", false
+	}
+
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(strings.TrimRight(lines[i], " \t\r"))
+		if !strings.HasPrefix(line, "›") && !strings.HasPrefix(line, ">") {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "›"), ">"))
+		if !promptBodiesMatch(body, firstLine) {
+			continue
+		}
+		end := promptEchoBlockEnd(lines, i, echoTail)
+		return tmuxctl.NormalizeSnapshot(strings.Join(lines[end+1:], "\n")), true
+	}
+	return "", false
+}
+
+func anchoredRunOutputDelta(snapshot string, input string, echoTail string, visibleOutput string) (string, bool) {
+	anchoredText, anchored := normalizedSnapshotAfterPromptEcho(snapshot, input, echoTail)
+	if !anchored {
+		return "", false
+	}
+	anchoredText = strings.Trim(anchoredText, "\n")
+	visibleOutput = strings.Trim(visibleOutput, "\n")
+	if strings.TrimSpace(visibleOutput) == "" {
+		return anchoredText, true
+	}
+	if anchoredText == visibleOutput {
+		return "", true
+	}
+	if strings.HasPrefix(anchoredText, visibleOutput) {
+		return strings.TrimLeft(anchoredText[len(visibleOutput):], "\n"), true
+	}
+	delta, reset := tmuxctl.DiffText(visibleOutput, anchoredText)
+	if !reset {
+		return strings.Trim(delta, "\n"), true
+	}
+	// Treat unmatched anchored rewrites as baseline churn: keep the current
+	// visible body and re-anchor the snapshot without forwarding a replay.
+	return "", true
+}
+
+func promptEchoBlockEnd(lines []string, start int, echoTail string) int {
+	if start < 0 || start >= len(lines) {
+		return start
+	}
+	end := start
+	tail := strings.ReplaceAll(echoTail, "\r\n", "\n")
+	tail = strings.Trim(tail, "\n")
+	if tail != "" {
+		tailLines := normalizePromptEchoLines(strings.Split(tail, "\n"))
+		idx := start + 1
+		matched := true
+		for _, line := range tailLines {
+			if idx >= len(lines) || strings.TrimRight(lines[idx], " \t\r") != line {
+				matched = false
+				break
+			}
+			end = idx
+			idx++
+		}
+		if matched {
+			return end
+		}
+		end = start
+	}
+
+	for idx := start + 1; idx < len(lines); idx++ {
+		trimmed := strings.TrimSpace(strings.TrimRight(lines[idx], " \t\r"))
+		if trimmed == "" || looksLikePromptOrBusyChrome(trimmed) || looksLikeAssistantOutputLine(trimmed) {
+			return end
+		}
+		end = idx
+	}
+	return end
+}
+
+func looksLikePromptOrBusyChrome(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	if strings.HasPrefix(line, "›") || strings.HasPrefix(line, ">") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(line), "esc to interrupt")
+}
+
+func looksLikeAssistantOutputLine(line string) bool {
+	line = strings.TrimLeft(line, " \t")
+	return strings.HasPrefix(line, "•") ||
+		strings.HasPrefix(line, "◦") ||
+		strings.HasPrefix(line, "●") ||
+		strings.HasPrefix(line, "○")
+}
+
 func snapshotContainsPromptEcho(snapshot string, input string) bool {
 	input = strings.ReplaceAll(input, "\r\n", "\n")
 	input = strings.TrimSpace(input)
@@ -1069,25 +1423,64 @@ func snapshotContainsPromptEcho(snapshot string, input string) bool {
 		}
 		if strings.HasPrefix(line, "›") {
 			body := strings.TrimSpace(strings.TrimPrefix(line, "›"))
-			return promptBodiesMatch(body, firstLine)
+			if promptBodiesMatch(body, firstLine) {
+				return true
+			}
+			continue
 		}
 		if strings.HasPrefix(line, ">") {
 			body := strings.TrimSpace(strings.TrimPrefix(line, ">"))
-			return promptBodiesMatch(body, firstLine)
+			if promptBodiesMatch(body, firstLine) {
+				return true
+			}
+			continue
 		}
 	}
 	return false
 }
 
+func latestPromptBody(snapshot string) (string, bool) {
+	snapshot = strings.ReplaceAll(snapshot, "\r\n", "\n")
+	lines := strings.Split(snapshot, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(strings.TrimRight(lines[i], " \t\r"))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "›") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "›")), true
+		}
+		if strings.HasPrefix(line, ">") {
+			return strings.TrimSpace(strings.TrimPrefix(line, ">")), true
+		}
+	}
+	return "", false
+}
+
+func promptFirstLine(input string) string {
+	input = strings.ReplaceAll(input, "\r\n", "\n")
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.Split(input, "\n")[0])
+}
+
 func promptBodiesMatch(body string, firstLine string) bool {
-	body = strings.TrimSpace(body)
-	firstLine = strings.TrimSpace(firstLine)
+	body = normalizePromptBody(body)
+	firstLine = normalizePromptBody(firstLine)
 	if body == "" || firstLine == "" {
 		return false
 	}
-	return body == firstLine ||
-		strings.Contains(body, firstLine) ||
-		strings.Contains(firstLine, body)
+	return body == firstLine
+}
+
+func normalizePromptBody(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(text), " ")
 }
 
 func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
@@ -1572,6 +1965,7 @@ func (s *Service) prepareOutputForDispatch(rt *groupRuntime) {
 	if rt == nil {
 		return
 	}
+	rt.outputGeneration++
 	s.clearWorkingStatus(rt)
 	rt.clearOutputBuffer()
 	rt.outputText = ""
@@ -1789,6 +2183,7 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 		rt.outputText = candidateText
 		return
 	}
+	outputGeneration := rt.outputGeneration
 	existingMessages := make([]trackedMessage, len(rt.outputMessages))
 	copy(existingMessages, rt.outputMessages)
 	groupID := rt.opts.GroupID
@@ -1796,6 +2191,20 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 		messages, err := s.syncEditableOutputSnapshot(ctx, editable, groupID, existingMessages, desiredText, !forceEditable)
 		return deliveryResult{messages: messages}, err
 	}, func(result deliveryResult, err error) {
+		if outputGeneration != rt.outputGeneration {
+			s.logger.Warn(
+				"ignoring stale editable output completion",
+				"group_id",
+				rt.opts.GroupID,
+				"run_id",
+				runID,
+				"stale_output_generation",
+				outputGeneration,
+				"current_output_generation",
+				rt.outputGeneration,
+			)
+			return
+		}
 		if isMessageNotModifiedError(err) {
 			rt.outputMessages = result.messages
 			rt.outputText = candidateText
@@ -2841,6 +3250,180 @@ func (s *Service) logOutputTrace(rt *groupRuntime, message string, now time.Time
 	}
 	base = append(base, attrs...)
 	s.logger.Info(message, base...)
+}
+
+func (s *Service) logInitialReplayDiagnostic(rt *groupRuntime, snapshot string, snapshotPromptObserved bool, prevPromptBlockObserved bool, currPromptBlockObserved bool, currFullText string, prevText string, currText string) {
+	if rt == nil {
+		return
+	}
+	s.logger.Warn(
+		"initial replay diagnostic",
+		"group_id", rt.opts.GroupID,
+		"run_id", rt.runID,
+		"busy", rt.lastBusy,
+		"run_busy_seen", rt.runBusySeen,
+		"run_prompt_observed", rt.runPromptObserved,
+		"prompt_echo_pending", rt.promptEchoPending,
+		"snapshot_prompt_observed", snapshotPromptObserved,
+		"prev_prompt_block_observed", prevPromptBlockObserved,
+		"curr_prompt_block_observed", currPromptBlockObserved,
+		"base_len", utf8.RuneCountInString(strings.Trim(rt.baseText, "\n")),
+		"last_len", utf8.RuneCountInString(strings.Trim(rt.lastText, "\n")),
+		"curr_full_len", utf8.RuneCountInString(strings.Trim(currFullText, "\n")),
+		"prev_len", utf8.RuneCountInString(strings.Trim(prevText, "\n")),
+		"curr_len", utf8.RuneCountInString(strings.Trim(currText, "\n")),
+		"base_curr_overlap_lines", lineTailHeadOverlap(rt.baseText, currFullText),
+		"last_curr_overlap_lines", lineTailHeadOverlap(rt.lastText, currFullText),
+		"base_head", logTextHead(rt.baseText, 3),
+		"base_tail", logTextTail(rt.baseText, 6),
+		"last_head", logTextHead(rt.lastText, 3),
+		"last_tail", logTextTail(rt.lastText, 6),
+		"curr_head", logTextHead(currFullText, 3),
+		"curr_tail", logTextTail(currFullText, 6),
+		"snapshot_tail", logTextTail(snapshot, 10),
+	)
+}
+
+func lineTailHeadOverlap(base string, curr string) int {
+	base = strings.Trim(base, "\n")
+	curr = strings.Trim(curr, "\n")
+	if base == "" || curr == "" {
+		return 0
+	}
+	baseLines := strings.Split(base, "\n")
+	currLines := strings.Split(curr, "\n")
+	maxOverlap := minInt(len(baseLines), len(currLines))
+	for n := maxOverlap; n > 0; n-- {
+		if equalStringSlices(baseLines[len(baseLines)-n:], currLines[:n]) {
+			return n
+		}
+	}
+	return 0
+}
+
+func suspiciousInitialWindowReplay(rt *groupRuntime, currFullText string, currText string) bool {
+	if rt == nil {
+		return false
+	}
+	baseText := strings.Trim(rt.baseText, "\n")
+	currFullText = strings.Trim(currFullText, "\n")
+	currText = strings.Trim(currText, "\n")
+	if baseText == "" || currFullText == "" || currText == "" {
+		return false
+	}
+	baseLen := utf8.RuneCountInString(baseText)
+	currFullLen := utf8.RuneCountInString(currFullText)
+	currLen := utf8.RuneCountInString(currText)
+	if baseLen < 4000 || currLen < 4000 {
+		return false
+	}
+	if lineTailHeadOverlap(baseText, currFullText) != 0 || lineTailHeadOverlap(rt.lastText, currFullText) != 0 {
+		return false
+	}
+	nearDeltaLimit := maxInt(512, baseLen/100)
+	return absInt(currFullLen-baseLen) <= nearDeltaLimit
+}
+
+func recoverWindowRewriteDelta(prev string, curr string) string {
+	prev = strings.Trim(prev, "\n")
+	curr = strings.Trim(curr, "\n")
+	if prev == "" || curr == "" || prev == curr {
+		return ""
+	}
+	prevLines := strings.Split(prev, "\n")
+	currLines := strings.Split(curr, "\n")
+
+	prefix := 0
+	for prefix < len(prevLines) && prefix < len(currLines) && prevLines[prefix] == currLines[prefix] {
+		prefix++
+	}
+
+	suffix := 0
+	for suffix < len(prevLines)-prefix && suffix < len(currLines)-prefix {
+		prevLine := prevLines[len(prevLines)-1-suffix]
+		currLine := currLines[len(currLines)-1-suffix]
+		if prevLine != currLine {
+			break
+		}
+		suffix++
+	}
+
+	start := prefix
+	end := len(currLines) - suffix
+	if start >= end {
+		return ""
+	}
+	delta := strings.Trim(strings.Join(currLines[start:end], "\n"), "\n")
+	if delta == "" {
+		return ""
+	}
+	if strings.Contains(prev, delta) {
+		return ""
+	}
+	currLen := utf8.RuneCountInString(curr)
+	deltaLen := utf8.RuneCountInString(delta)
+	if deltaLen > maxInt(2048, currLen/8) {
+		return ""
+	}
+	return delta
+}
+
+func equalStringSlices(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func logTextHead(text string, lines int) string {
+	return logTextPreview(text, lines, true)
+}
+
+func logTextTail(text string, lines int) string {
+	return logTextPreview(text, lines, false)
+}
+
+func logTextPreview(text string, lines int, head bool) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.Trim(text, "\n")
+	if text == "" || lines <= 0 {
+		return ""
+	}
+	parts := strings.Split(text, "\n")
+	if len(parts) > lines {
+		if head {
+			parts = parts[:lines]
+		} else {
+			parts = parts[len(parts)-lines:]
+		}
+	}
+	return strings.Join(parts, " | ")
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func splitByRunes(text string, limit int) []string {
