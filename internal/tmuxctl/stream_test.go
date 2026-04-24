@@ -30,6 +30,25 @@ func TestNormalizeSnapshot(t *testing.T) {
 	}
 }
 
+func TestNormalizeSnapshotDropsCodexSessionFootersAndMetadataWarnings(t *testing.T) {
+	t.Parallel()
+
+	raw := "⚠ Model metadata for `gpt-5.5` not found. Defaulting to fallback metadata; this\n" +
+		"  can degrade performance and cause issues.\n\n" +
+		"• Hi. What do you need me to check or change next?\n\n" +
+		"Token usage: total=598,496 input=577,081 output=21,415\n" +
+		"To continue this session, run codex resume 019dbec9-d811-7fa3-ab05-ba7fd12bdcf2\n\n" +
+		"User attached an image: /tmp/file.jpg. Inspect it.\n\n" +
+		"› Implement {feature}\n\n" +
+		"  gpt-5.5 xhigh · ~/flow/imcodex"
+
+	got := NormalizeSnapshot(raw)
+	want := "• Hi. What do you need me to check or change next?"
+	if got != want {
+		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, want)
+	}
+}
+
 func TestDiffTextUsesOverlap(t *testing.T) {
 	t.Parallel()
 

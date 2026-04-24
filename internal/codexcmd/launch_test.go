@@ -92,6 +92,55 @@ func TestLaunchCommandDoesNotFallbackAfterSuccessfulResume(t *testing.T) {
 	}
 }
 
+func TestLaunchCommandDisablesCodexUpdateNotifier(t *testing.T) {
+	t.Parallel()
+
+	workdir := filepath.Join(t.TempDir(), "repo 'no update notifier'")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	argsFile, env := fakeCodexEnv(t, workdir)
+	cmd := exec.Command("sh", "-lc", LaunchCommand(workdir))
+	cmd.Env = envSlice(env)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	got := readArgsLog(t, argsFile)
+	if len(got) != 1 {
+		t.Fatalf("invocations = %#v, want one resume invocation", got)
+	}
+	if !strings.Contains(got[0], "NO_UPDATE_NOTIFIER=1") {
+		t.Fatalf("invocation = %q, want NO_UPDATE_NOTIFIER=1", got[0])
+	}
+}
+
+func TestLaunchCommandPreservesExplicitUpdateNotifierOverride(t *testing.T) {
+	t.Parallel()
+
+	workdir := filepath.Join(t.TempDir(), "repo 'update notifier override'")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	argsFile, env := fakeCodexEnv(t, workdir)
+	env["NO_UPDATE_NOTIFIER"] = "0"
+	cmd := exec.Command("sh", "-lc", LaunchCommand(workdir))
+	cmd.Env = envSlice(env)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	got := readArgsLog(t, argsFile)
+	if len(got) != 1 {
+		t.Fatalf("invocations = %#v, want one resume invocation", got)
+	}
+	if !strings.Contains(got[0], "NO_UPDATE_NOTIFIER=0") {
+		t.Fatalf("invocation = %q, want explicit NO_UPDATE_NOTIFIER override preserved", got[0])
+	}
+}
+
 func TestFreshLaunchCommandSkipsResume(t *testing.T) {
 	t.Parallel()
 
@@ -290,7 +339,7 @@ func fakeCodexEnv(t *testing.T, workdir string) (string, map[string]string) {
 	argsFile := filepath.Join(root, "codex-args.txt")
 	scriptPath := filepath.Join(binDir, "codex")
 	script := fmt.Sprintf(`#!/bin/sh
-printf '%%s\tCODEX_HOME=%%s\n' "$*" "${CODEX_HOME}" >> %s
+	printf '%%s\tCODEX_HOME=%%s\tNO_UPDATE_NOTIFIER=%%s\n' "$*" "${CODEX_HOME}" "${NO_UPDATE_NOTIFIER}" >> %s
 if [ "$1" = "resume" ]; then
   exit "${IMCODEX_FAKE_RESUME_STATUS:-0}"
 fi

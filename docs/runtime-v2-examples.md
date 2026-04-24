@@ -2,6 +2,15 @@
 
 ## Default Host Runtime
 
+Before launching unattended Codex sessions, persist the update-notifier guard:
+
+```bash
+echo 'export NO_UPDATE_NOTIFIER=1' >> ~/.zshrc
+```
+
+Restart the shell, or export it in the current shell before starting `imcodex`.
+The managed launcher also defaults `NO_UPDATE_NOTIFIER` to `1`.
+
 Start `imcodex` with the default host runtime:
 
 ```bash
@@ -47,7 +56,7 @@ rebuilding the managed local `imcodex-codex:stable` image.
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.120.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.10 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.12 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -72,7 +81,7 @@ groups:
 ## Notes
 
 - YAML no longer contains `runtime`, `runtime_config_dir`, or `session_command`.
-- `host-codex` is the default runtime in `v2.2.10`.
+- `host-codex` is the default runtime in `v2.2.12`.
 - `docker-codex` only activates when you pass `--runtime docker-codex`.
 - `docker_image` is optional and only affects `docker-codex`.
 - `~/...`, `$HOME/...`, and `${HOME}/...` work in path fields.

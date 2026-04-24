@@ -81,10 +81,19 @@ Replacement startup flags:
 
 ## Stable Codex Version
 
-The Docker runtime for `v2.2.10` pins Codex CLI `0.120.0`.
+The Docker runtime for `v2.2.12` pins Codex CLI `0.120.0`.
 
 That version is baked into the local `stable` image build. This avoids live
 interactive upgrade prompts during production traffic.
+
+For host runtime, persist the same guard before starting `imcodex`:
+
+```bash
+echo 'export NO_UPDATE_NOTIFIER=1' >> ~/.zshrc
+```
+
+Restart the shell, or export it in the current shell first. The managed Codex
+launcher defaults `NO_UPDATE_NOTIFIER` to `1` when it invokes Codex.
 
 ## Operational Notes
 
