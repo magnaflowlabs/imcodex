@@ -2996,6 +2996,56 @@ func TestServiceResetBufferedOutputSkipsEqualLengthResetWithDetachedBacklog(t *t
 	}
 }
 
+func TestServiceResetBufferedOutputReplacesActiveRewriteInsteadOfAppending(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeEditableMessenger{}, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		outputText:   "• alpha old",
+		outputBuffer: "• beta old",
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• alpha old"},
+		},
+		lastBusy: true,
+		active:   &activeRequest{messageID: "om_1", input: "work"},
+	}
+
+	if !svc.resetBufferedOutput(rt, "• gamma new") {
+		t.Fatal("resetBufferedOutput() = false, want active rewrite handled")
+	}
+
+	if got := rt.outputText; got != "" {
+		t.Fatalf("outputText = %q, want cleared so editable body is rewritten", got)
+	}
+	if got, want := rt.outputBuffer, "• gamma new"; got != want {
+		t.Fatalf("outputBuffer = %q, want rewritten snapshot %q", got, want)
+	}
+	if got := len(rt.outputMessages); got != 1 {
+		t.Fatalf("len(outputMessages) = %d, want existing editable message kept", got)
+	}
+}
+
+func TestGroupRuntimeDeduplicatesDetachedChunksForSameRun(t *testing.T) {
+	t.Parallel()
+
+	rt := &groupRuntime{}
+	text := strings.Repeat("a", maxDetachedMessageRunes) + strings.Repeat("b", 17)
+
+	rt.enqueueDetachedOutput(7, text)
+	if got := len(rt.detachedOutputs); got != 2 {
+		t.Fatalf("len(detachedOutputs) = %d, want 2", got)
+	}
+	rt.enqueueDetachedOutput(7, text)
+	if got := len(rt.detachedOutputs); got != 2 {
+		t.Fatalf("len(detachedOutputs) after duplicate = %d, want 2", got)
+	}
+	rt.enqueueDetachedOutput(8, text)
+	if got := len(rt.detachedOutputs); got != 4 {
+		t.Fatalf("len(detachedOutputs) for different run = %d, want 4", got)
+	}
+}
+
 func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testing.T) {
 	t.Parallel()
 

@@ -1519,7 +1519,24 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 				currLen := utf8.RuneCountInString(currText)
 				bufferLen := utf8.RuneCountInString(bufferText)
 				if currLen < bufferLen && strings.HasPrefix(bufferText, currText) {
+					if rt.forcePlainOutput || len(rt.detachedOutputs) > 0 {
+						rt.outputText = bufferText
+						rt.clearOutputBuffer()
+						return true
+					}
 					return false
+				}
+				if currLen <= bufferLen && (rt.forcePlainOutput || len(rt.detachedOutputs) > 0) {
+					rt.outputText = bufferText
+					rt.clearOutputBuffer()
+					return true
+				}
+				if rt.resetWindowAlreadyObserved(rt.outputBuffer, currText, now) {
+					return true
+				}
+				if currLen <= bufferLen {
+					rt.replaceOutputBuffer(currText, now)
+					return true
 				}
 				if currLen == bufferLen && rt.shouldTreatEqualResetAsChurn(bufferLen) {
 					return true
@@ -1552,7 +1569,25 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 			trimmedKnownText := strings.Trim(knownText, "\n")
 			knownLen := utf8.RuneCountInString(trimmedKnownText)
 			if currLen < knownLen && strings.HasPrefix(trimmedKnownText, currText) {
+				if rt.forcePlainOutput || len(rt.detachedOutputs) > 0 {
+					rt.outputText = trimmedKnownText
+					rt.clearOutputBuffer()
+					return true
+				}
 				return false
+			}
+			if currLen <= knownLen && (rt.forcePlainOutput || len(rt.detachedOutputs) > 0) {
+				rt.outputText = trimmedKnownText
+				rt.clearOutputBuffer()
+				return true
+			}
+			if rt.resetWindowAlreadyObserved(knownText, currText, now) {
+				return true
+			}
+			if currLen <= knownLen {
+				rt.outputText = ""
+				rt.replaceOutputBuffer(currText, now)
+				return true
 			}
 			if currLen == knownLen && rt.shouldTreatEqualResetAsChurn(knownLen) {
 				return true
@@ -2709,6 +2744,9 @@ func (rt *groupRuntime) enqueueDetachedOutput(runID uint64, text string) {
 		if chunk == "" {
 			continue
 		}
+		if rt.hasDetachedOutputChunk(runID, chunk) {
+			continue
+		}
 		cursor++
 		rt.detachedOutputs = append(rt.detachedOutputs, detachedOutput{
 			runID:      runID,
@@ -2717,6 +2755,18 @@ func (rt *groupRuntime) enqueueDetachedOutput(runID uint64, text string) {
 			enqueuedAt: time.Now(),
 		})
 	}
+}
+
+func (rt *groupRuntime) hasDetachedOutputChunk(runID uint64, chunk string) bool {
+	if rt == nil || chunk == "" {
+		return false
+	}
+	for _, item := range rt.detachedOutputs {
+		if item.runID == runID && item.text == chunk {
+			return true
+		}
+	}
+	return false
 }
 
 type detachedSendBatch struct {
