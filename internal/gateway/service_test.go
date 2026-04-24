@@ -3046,6 +3046,64 @@ func TestGroupRuntimeDeduplicatesDetachedChunksForSameRun(t *testing.T) {
 	}
 }
 
+func TestServiceFlushOutputBufferSkipsDetachedBaselineReplay(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	baseline := "• already observed\n" + strings.Repeat("x", maxMessageRunes)
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		runID:        2,
+		nextRunID:    2,
+		outputBuffer: baseline,
+		detachedOutputs: []detachedOutput{
+			{runID: 2, cursor: 1, text: "queued"},
+		},
+	}
+	rt.noteDetachedBaseline(2, baseline)
+
+	svc.flushOutputBuffer(rt)
+
+	if got := len(rt.detachedOutputs); got != 1 {
+		t.Fatalf("len(detachedOutputs) = %d, want duplicate baseline not requeued", got)
+	}
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want cleared duplicate baseline", rt.outputBuffer)
+	}
+	if got := rt.outputText; got != baseline {
+		t.Fatalf("outputText = %q, want baseline restored", got)
+	}
+}
+
+func TestServiceFlushOutputBufferQueuesOnlyTailPastDetachedBaseline(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	baseline := "• already observed"
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		runID:        2,
+		nextRunID:    2,
+		outputBuffer: baseline + "\n• new tail",
+		detachedOutputs: []detachedOutput{
+			{runID: 2, cursor: 1, text: "queued"},
+		},
+	}
+	rt.noteDetachedBaseline(2, baseline)
+
+	svc.flushOutputBuffer(rt)
+
+	if got := len(rt.detachedOutputs); got != 2 {
+		t.Fatalf("len(detachedOutputs) = %d, want one new tail queued", got)
+	}
+	if got, want := rt.detachedOutputs[1].text, "• new tail"; got != want {
+		t.Fatalf("queued text = %q, want %q", got, want)
+	}
+	if got := rt.outputText; got != baseline+"\n• new tail" {
+		t.Fatalf("outputText = %q, want advanced baseline with tail", got)
+	}
+}
+
 func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testing.T) {
 	t.Parallel()
 

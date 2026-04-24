@@ -81,7 +81,7 @@ Replacement startup flags:
 
 ## Stable Codex Version
 
-The Docker runtime for `v2.2.13` pins Codex CLI `0.120.0`.
+The Docker runtime for `v2.2.14` pins Codex CLI `0.120.0`.
 
 That version is baked into the local `stable` image build. This avoids live
 interactive upgrade prompts during production traffic.
