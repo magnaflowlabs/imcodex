@@ -346,7 +346,7 @@ esac
 	if !strings.Contains(logText, "kill-session -t demo") {
 		t.Fatalf("tmux log = %q, want session killed before recreate", logText)
 	}
-	if !strings.Contains(logText, `new-session -d -P -F #{pane_id} -s demo -n imcodex IMCODEX_SOURCE_CODEX_HOME=${CODEX_HOME:-"${HOME}/.codex"}`) {
+	if !strings.Contains(logText, `new-session -d -P -F #{pane_id} -s demo -n imcodex export NO_UPDATE_NOTIFIER="${NO_UPDATE_NOTIFIER:-1}"; IMCODEX_SOURCE_CODEX_HOME=${CODEX_HOME:-"${HOME}/.codex"}`) {
 		t.Fatalf("tmux log = %q, want managed home bootstrap on reset", logText)
 	}
 	if !strings.Contains(logText, "exec 'codex' '-a' 'never' '-s' 'danger-full-access' '--no-alt-screen' '-C'") {

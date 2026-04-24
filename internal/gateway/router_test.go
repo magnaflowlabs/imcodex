@@ -123,8 +123,8 @@ func TestRouterKeepsGroupBuffersIsolated(t *testing.T) {
 	messenger := &groupRecordingMessenger{}
 	console := &sessionConsole{
 		captures: map[string][]string{
-			"imcodex-a-oc-1": {"", "• alpha reply", "• alpha reply"},
-			"imcodex-b-oc-2": {"", "• beta reply", "• beta reply"},
+			"imcodex-a-oc-1": {"", "", "• alpha reply", "• alpha reply"},
+			"imcodex-b-oc-2": {"", "", "• beta reply", "• beta reply"},
 		},
 	}
 	router, err := NewRouter(ctx, []Options{

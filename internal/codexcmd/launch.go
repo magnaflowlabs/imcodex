@@ -84,6 +84,7 @@ func FreshLaunchCommandForSession(cwd string, sessionName string) string {
 
 func managedHomeBootstrap(cwd string, sessionName string, clearState bool) string {
 	lines := []string{
+		`export NO_UPDATE_NOTIFIER="${NO_UPDATE_NOTIFIER:-1}"`,
 		`IMCODEX_SOURCE_CODEX_HOME=${CODEX_HOME:-"${HOME}/.codex"}`,
 		`IMCODEX_MANAGED_CODEX_HOME="${IMCODEX_SOURCE_CODEX_HOME%/*}/.imcodex/codex/` + managedHomeKey(cwd, sessionName) + `"`,
 		`mkdir -p "${IMCODEX_MANAGED_CODEX_HOME}"`,

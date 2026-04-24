@@ -57,22 +57,35 @@ mkdir -p "${out_dir}"
 
 for target in "${targets[@]}"; do
   read -r goos goarch <<<"${target}"
-  stage_dir="${out_dir}/${release_prefix}-${goos}-${goarch}"
-  archive_name="${release_prefix}-${goos}-${goarch}.tar.gz"
+  asset_name="${release_prefix}-${goos}-${goarch}"
+  asset_path="${out_dir}/${asset_name}"
 
-  rm -rf "${stage_dir}"
-  mkdir -p "${stage_dir}"
+  rm -f "${asset_path}"
 
   CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-    go build -trimpath -ldflags="-s -w" -o "${stage_dir}/imcodex" .
+    go build -trimpath -ldflags="-s -w" -o "${asset_path}" .
 
-  cp LICENSE README.md config.example.yaml "${stage_dir}/"
-  tar -C "${stage_dir}" -czf "${out_dir}/${archive_name}" .
-  rm -rf "${stage_dir}"
+  chmod 0755 "${asset_path}"
+done
+
+if find "${out_dir}" -type f \( -name '*.tar' -o -name '*.tar.*' -o -name '*.tgz' \) | grep -q .; then
+  echo "release assets must be standalone binaries; tar archives are not allowed" >&2
+  exit 1
+fi
+
+assets=()
+for target in "${targets[@]}"; do
+  read -r goos goarch <<<"${target}"
+  asset_name="${release_prefix}-${goos}-${goarch}"
+  if [[ ! -x "${out_dir}/${asset_name}" ]]; then
+    echo "missing release binary: ${asset_name}" >&2
+    exit 1
+  fi
+  assets+=("${asset_name}")
 done
 
 (
   cd "${out_dir}"
-  "${checksum_cmd[@]}" ./*.tar.gz > "${release_prefix}-checksums.txt"
+  "${checksum_cmd[@]}" "${assets[@]}" > "${release_prefix}-checksums.txt"
   "${verify_checksum_cmd[@]}" "${release_prefix}-checksums.txt"
 )

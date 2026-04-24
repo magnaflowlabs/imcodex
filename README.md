@@ -76,7 +76,9 @@ To build the GitHub release artifacts locally:
 make release
 ```
 
-That writes versioned tarballs plus a checksum file to `build/release/`.
+That writes standalone versioned binaries plus a checksum file to
+`build/release/`. Release assets are not tar-packed, so downloading a binary
+does not risk changing the extraction directory's permissions.
 
 ## Configuration
 
@@ -115,6 +117,17 @@ Path fields support:
 - `${HOME}/...`
 
 ## Run
+
+Before starting `imcodex`, disable Codex's interactive update notifier in your
+login shell so unattended sessions do not self-upgrade mid-run:
+
+```bash
+echo 'export NO_UPDATE_NOTIFIER=1' >> ~/.zshrc
+```
+
+Restart the shell, or run `export NO_UPDATE_NOTIFIER=1` in the current shell,
+then start `imcodex`. The managed Codex launcher also defaults this variable to
+`1` as a safety net.
 
 Default host runtime:
 
@@ -174,7 +187,7 @@ If you want to prebuild the same image manually:
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.120.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.10 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.12 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -211,7 +224,7 @@ and `tmux` session reuse continue to work the same way.
 
 ## Message Delivery
 
-`v2.2.10` keeps host runtime as the default and further hardens Telegram delivery
+`v2.2.12` keeps host runtime as the default and further hardens Telegram delivery
 behavior without changing the public config
 surface:
 
@@ -250,5 +263,5 @@ More detailed runtime notes:
 ## Example Startup Log
 
 ```text
-imcodex 2.2.4 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
+imcodex 2.2.12 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
 ```

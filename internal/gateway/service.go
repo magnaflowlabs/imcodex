@@ -149,55 +149,55 @@ type activeRequest struct {
 }
 
 type groupRuntime struct {
-	opts                 Options
-	session              string
-	queue                chan IncomingMessage
-	deliveryDone         chan deliveryCompletion
-	pending              []IncomingMessage
-	active               *activeRequest
-	outputArmed          bool
-	promptEchoTail       string
-	promptEchoPending    bool
-	runBusySeen          bool
-	runPromptObserved    bool
-	preBusyMutedText     string
-	preBusyMutedChanges  int
-	preBusyMutedStable   int
-	sessionReady         bool
-	lastText             string
-	baseText             string
-	lastBusy             bool
-	idleTicks            int
-	outputBuffer         string
-	outputBufferedAt     time.Time
-	outputBufferedTicks  int
-	lastOutputWatchdogAt time.Time
-	lastOutputTraceAt    time.Time
-	lastOutputTraceKey   string
-	outputText           string
-	outputMessages       []trackedMessage
-	statusMessage        trackedMessage
-	detachedOutputs      []detachedOutput
-	outputBackoffUntil   time.Time
-	detachedBackoffUntil time.Time
-	detachedRetryCount   int
-	editBackoffUntil     time.Time
-	editRateLimitCount   int
-	lastEditableSyncAt   time.Time
-	nextDetachedSendAt   time.Time
-	deferBodyUntilIdle   bool
-	forcePlainOutput     bool
-	busySince            time.Time
-	workingSent          bool
-	workingBackoffUntil  time.Time
-	lastActionAt         time.Time
-	interruptSentAt      time.Time
-	forceInterruptSent   bool
-	deliveryInFlight     bool
-	outputGeneration     uint64
-	runID                uint64
-	nextRunID            uint64
-	runCursorCommitted   map[uint64]int
+	opts                   Options
+	session                string
+	queue                  chan IncomingMessage
+	deliveryDone           chan deliveryCompletion
+	pending                []IncomingMessage
+	active                 *activeRequest
+	outputArmed            bool
+	promptEchoTail         string
+	promptEchoPending      bool
+	runBusySeen            bool
+	runPromptObserved      bool
+	preBusyMutedText       string
+	preBusyMutedChanges    int
+	preBusyMutedStable     int
+	sessionReady           bool
+	lastText               string
+	baseText               string
+	lastBusy               bool
+	idleTicks              int
+	outputBuffer           string
+	outputBufferedAt       time.Time
+	outputBufferedTicks    int
+	lastOutputWatchdogAt   time.Time
+	lastDetachedWatchdogAt time.Time
+	outputTraceAtByKey     map[string]time.Time
+	outputText             string
+	outputMessages         []trackedMessage
+	statusMessage          trackedMessage
+	detachedOutputs        []detachedOutput
+	outputBackoffUntil     time.Time
+	detachedBackoffUntil   time.Time
+	detachedRetryCount     int
+	editBackoffUntil       time.Time
+	editRateLimitCount     int
+	lastEditableSyncAt     time.Time
+	nextDetachedSendAt     time.Time
+	deferBodyUntilIdle     bool
+	forcePlainOutput       bool
+	busySince              time.Time
+	workingSent            bool
+	workingBackoffUntil    time.Time
+	lastActionAt           time.Time
+	interruptSentAt        time.Time
+	forceInterruptSent     bool
+	deliveryInFlight       bool
+	outputGeneration       uint64
+	runID                  uint64
+	nextRunID              uint64
+	runCursorCommitted     map[uint64]int
 }
 
 type deliveryCompletion struct {
@@ -883,6 +883,7 @@ func (s *Service) poll(rt *groupRuntime) {
 	unanchoredInitialBusyOutput := rt.outputArmed &&
 		rt.active != nil &&
 		busyRaw &&
+		strings.TrimSpace(rt.baseText) != "" &&
 		!rt.runBusySeen &&
 		!rt.runPromptObserved &&
 		strings.TrimSpace(prevText) == "" &&
@@ -1153,6 +1154,9 @@ func (s *Service) shouldHoldBusyForSilentRun(rt *groupRuntime, currText string, 
 		return false
 	}
 	if !rt.interruptSentAt.IsZero() {
+		return false
+	}
+	if rt.runBusySeen {
 		return false
 	}
 	if now.Sub(rt.busySince) >= s.silentBusyGrace {
@@ -1487,6 +1491,7 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 	if rt == nil {
 		return true
 	}
+	now := time.Now()
 	currText = strings.Trim(currText, "\n")
 	if strings.TrimSpace(currText) == "" {
 		// While a run is still in-flight, an empty capture can be transient
@@ -1496,6 +1501,7 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 			return false
 		}
 		rt.outputText = ""
+		rt.outputMessages = nil
 		if !rt.hasBufferedOutput() {
 			rt.clearOutputBuffer()
 		}
@@ -1508,38 +1514,95 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 	if strings.TrimSpace(rt.outputText) == "" && strings.TrimSpace(rt.outputBuffer) != "" {
 		deltaBuf, resetBuf := tmuxctl.DiffText(rt.outputBuffer, currText)
 		if resetBuf {
+			bufferText := strings.Trim(rt.outputBuffer, "\n")
+			if rt.active != nil {
+				currLen := utf8.RuneCountInString(currText)
+				bufferLen := utf8.RuneCountInString(bufferText)
+				if currLen < bufferLen && strings.HasPrefix(bufferText, currText) {
+					return false
+				}
+				if currLen == bufferLen && rt.shouldTreatEqualResetAsChurn(bufferLen) {
+					return true
+				}
+			}
+			if rt.resetWindowAlreadyObserved(rt.outputBuffer, currText, now) {
+				return true
+			}
 			// With no committed baseline yet, a reset means pane content was
 			// rewritten. Keep only the latest snapshot to avoid replaying
 			// transient body fragments that Codex has already replaced.
-			rt.replaceOutputBuffer(currText, time.Now())
+			rt.replaceOutputBuffer(currText, now)
 			return true
 		}
 		if strings.TrimSpace(deltaBuf) == "" {
 			return true
 		}
-		rt.replaceOutputBuffer(mergeBufferedOutput(rt.outputBuffer, deltaBuf), time.Now())
+		rt.replaceOutputBuffer(mergeBufferedOutput(rt.outputBuffer, deltaBuf), now)
 		return true
 	}
 
 	delta, reset := tmuxctl.DiffText(rt.outputText, currText)
 	if reset {
+		knownText := mergeBufferedOutput(rt.outputText, rt.outputBuffer)
 		// If the pane snapshot temporarily shrinks while the run is still
 		// active, keep the already-synced baseline and wait for a stable
 		// snapshot instead of rewriting to a shorter body.
-		if rt.active != nil && utf8.RuneCountInString(currText) < utf8.RuneCountInString(rt.outputText) {
-			return false
+		if rt.active != nil {
+			currLen := utf8.RuneCountInString(currText)
+			trimmedKnownText := strings.Trim(knownText, "\n")
+			knownLen := utf8.RuneCountInString(trimmedKnownText)
+			if currLen < knownLen && strings.HasPrefix(trimmedKnownText, currText) {
+				return false
+			}
+			if currLen == knownLen && rt.shouldTreatEqualResetAsChurn(knownLen) {
+				return true
+			}
+		}
+		if rt.resetWindowAlreadyObserved(knownText, currText, now) {
+			return true
 		}
 		rt.outputText = ""
 		// Keep any already-buffered unsent body and merge the reset snapshot
 		// so transient pane resets do not drop tail output.
-		rt.replaceOutputBuffer(mergeBufferedOutput(rt.outputBuffer, currText), time.Now())
+		rt.replaceOutputBuffer(mergeBufferedOutput(rt.outputBuffer, currText), now)
 		return true
 	}
 	if strings.TrimSpace(delta) == "" {
 		return true
 	}
-	rt.replaceOutputBuffer(mergeBufferedOutput(rt.outputBuffer, delta), time.Now())
+	rt.replaceOutputBuffer(mergeBufferedOutput(rt.outputBuffer, delta), now)
 	return true
+}
+
+func (rt *groupRuntime) resetWindowAlreadyObserved(knownText string, currText string, now time.Time) bool {
+	if rt == nil {
+		return false
+	}
+	knownText = strings.Trim(knownText, "\n")
+	currText = strings.Trim(currText, "\n")
+	if strings.TrimSpace(knownText) == "" || strings.TrimSpace(currText) == "" {
+		return false
+	}
+	if currText == knownText || strings.Contains(knownText, currText) {
+		return true
+	}
+	if idx := strings.Index(currText, knownText); idx >= 0 {
+		rt.appendOutputBuffer(strings.TrimLeft(currText[idx+len(knownText):], "\n"), now)
+		return true
+	}
+	if overlap := lineTailHeadOverlap(knownText, currText); overlap >= 3 {
+		lines := strings.Split(currText, "\n")
+		rt.appendOutputBuffer(strings.TrimLeft(strings.Join(lines[overlap:], "\n"), "\n"), now)
+		return true
+	}
+	return false
+}
+
+func (rt *groupRuntime) shouldTreatEqualResetAsChurn(knownLen int) bool {
+	if rt == nil || rt.active == nil {
+		return false
+	}
+	return len(rt.detachedOutputs) > 0 || knownLen >= maxMessageRunes*8
 }
 
 func (s *Service) enqueuePending(rt *groupRuntime, msg IncomingMessage) {
@@ -1927,6 +1990,14 @@ func (s *Service) startDelivery(rt *groupRuntime, run func(context.Context) (del
 	}
 	rt.deliveryInFlight = true
 	done := rt.deliveryDone
+	if done == nil {
+		ctx, cancel := s.deliveryContext()
+		defer cancel()
+		result, err := run(ctx)
+		rt.deliveryInFlight = false
+		apply(result, err)
+		return true
+	}
 	serviceCtx := context.Background()
 	if s != nil && s.ctx != nil {
 		serviceCtx = s.ctx
@@ -2729,7 +2800,10 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 		)
 		return
 	}
-	if s.detachedWatchdogAfter > 0 && !rt.detachedOutputs[0].enqueuedAt.IsZero() && now.Sub(rt.detachedOutputs[0].enqueuedAt) >= s.detachedWatchdogAfter {
+	if s.detachedWatchdogAfter > 0 &&
+		!rt.detachedOutputs[0].enqueuedAt.IsZero() &&
+		now.Sub(rt.detachedOutputs[0].enqueuedAt) >= s.detachedWatchdogAfter &&
+		(rt.lastDetachedWatchdogAt.IsZero() || now.Sub(rt.lastDetachedWatchdogAt) >= outputWatchdogLogEvery) {
 		s.logger.Warn(
 			"detached output watchdog forcing retry",
 			"group_id", rt.opts.GroupID,
@@ -2737,6 +2811,7 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 			"cursor", rt.detachedOutputs[0].cursor,
 			"age", now.Sub(rt.detachedOutputs[0].enqueuedAt).String(),
 		)
+		rt.lastDetachedWatchdogAt = now
 	}
 	if !rt.detachedBackoffUntil.IsZero() {
 		if rt.detachedBackoffUntil.After(now) {
@@ -3232,11 +3307,13 @@ func (s *Service) logOutputTrace(rt *groupRuntime, message string, now time.Time
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if rt.lastOutputTraceKey == message && !rt.lastOutputTraceAt.IsZero() && now.Sub(rt.lastOutputTraceAt) < outputTraceLogEvery {
+	if rt.outputTraceAtByKey == nil {
+		rt.outputTraceAtByKey = make(map[string]time.Time)
+	}
+	if last := rt.outputTraceAtByKey[message]; !last.IsZero() && now.Sub(last) < outputTraceLogEvery {
 		return
 	}
-	rt.lastOutputTraceKey = message
-	rt.lastOutputTraceAt = now
+	rt.outputTraceAtByKey[message] = now
 
 	base := []any{
 		"group_id", rt.opts.GroupID,

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1272,9 +1273,16 @@ func TestServiceRefreshesBaselineBeforeDispatchingNewRequest(t *testing.T) {
 	defer cancel()
 
 	console := &fakeConsole{
+		capturesByHistory: map[int][]string{
+			tmuxctl.CaptureFullHistory: {
+				"• previous reply final",
+			},
+			200: {
+				"• previous reply final",
+			},
+		},
 		captures: []string{
-			"• previous reply final",
-			"• previous reply final\n\nRan curl -L -s https://gmncode.cn\n<html>invite</html>\n\n• invite reply",
+			"• previous reply final\n\n› new question\n\nRan curl -L -s https://gmncode.cn\n<html>invite</html>\n\n• invite reply",
 		},
 	}
 	messenger := &fakeMessenger{}
@@ -1297,7 +1305,9 @@ func TestServiceRefreshesBaselineBeforeDispatchingNewRequest(t *testing.T) {
 		t.Fatalf("dispatchPrepared() error = %v", err)
 	}
 
-	svc.poll(rt)
+	for i := 0; i < 5; i++ {
+		svc.poll(rt)
+	}
 
 	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
 	if strings.Contains(joined, "previous reply") {
@@ -2907,6 +2917,85 @@ func TestServiceOutputWatchdogKeepsVeryLargeBufferedTailEvenBeforeLongBackoff(t 
 	}
 }
 
+func TestServiceResetBufferedOutputSkipsAlreadyObservedActiveWindow(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	observed := strings.Join([]string{
+		"• line 1",
+		"• line 2",
+		"• line 3",
+		"• line 4",
+		"• line 5",
+	}, "\n")
+	rt := &groupRuntime{
+		opts:       svc.opts,
+		outputText: observed,
+		lastBusy:   true,
+		active:     &activeRequest{messageID: "om_1", input: "work"},
+	}
+
+	if !svc.resetBufferedOutput(rt, strings.Join([]string{
+		"• line 3",
+		"• line 4",
+		"• line 5",
+	}, "\n")) {
+		t.Fatal("resetBufferedOutput() = false, want handled")
+	}
+
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want no replay for already observed window", rt.outputBuffer)
+	}
+	if got := rt.outputText; got != observed {
+		t.Fatalf("outputText = %q, want unchanged observed baseline", got)
+	}
+}
+
+func TestServiceResetBufferedOutputAppendsTailFromScrolledWindow(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:       svc.opts,
+		outputText: "• line 1\n• line 2\n• line 3\n• line 4\n• line 5",
+		lastBusy:   true,
+		active:     &activeRequest{messageID: "om_1", input: "work"},
+	}
+
+	if !svc.resetBufferedOutput(rt, "• line 3\n• line 4\n• line 5\n• line 6") {
+		t.Fatal("resetBufferedOutput() = false, want handled")
+	}
+
+	if got, want := strings.TrimSpace(rt.outputBuffer), "• line 6"; got != want {
+		t.Fatalf("outputBuffer = %q, want %q", got, want)
+	}
+}
+
+func TestServiceResetBufferedOutputSkipsEqualLengthResetWithDetachedBacklog(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:       svc.opts,
+		outputText: "• line A",
+		detachedOutputs: []detachedOutput{
+			{runID: 1, cursor: 1, text: "queued"},
+		},
+		lastBusy: true,
+		active:   &activeRequest{messageID: "om_1", input: "work"},
+	}
+
+	if !svc.resetBufferedOutput(rt, "• line B") {
+		t.Fatal("resetBufferedOutput() = false, want equal-length backlog churn handled")
+	}
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want no replay while detached backlog exists", rt.outputBuffer)
+	}
+	if got := rt.outputText; got != "• line A" {
+		t.Fatalf("outputText = %q, want unchanged observed baseline", got)
+	}
+}
+
 func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testing.T) {
 	t.Parallel()
 
@@ -2928,12 +3017,14 @@ func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testin
 		outputText:       "• synced",
 		outputBuffer:     "\n• new tail",
 		outputBufferedAt: time.Now(),
+		deliveryDone:     make(chan deliveryCompletion, 8),
 		outputMessages: []trackedMessage{
 			{messageID: "1", text: "• synced"},
 		},
 	}
 
 	svc.flushOutputBuffer(rt)
+	applyNextDelivery(t, rt)
 	if rt.forcePlainOutput {
 		t.Fatal("forcePlainOutput = true, want editable retry after first 429")
 	}
@@ -2941,6 +3032,7 @@ func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testin
 	rt.editBackoffUntil = time.Time{}
 
 	svc.flushOutputBuffer(rt)
+	applyNextDelivery(t, rt)
 	if rt.forcePlainOutput {
 		t.Fatal("forcePlainOutput = true, want repeated 429s to keep editable strategy")
 	}
@@ -2948,6 +3040,7 @@ func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testin
 	rt.editBackoffUntil = time.Time{}
 
 	svc.flushOutputBuffer(rt)
+	applyNextDelivery(t, rt)
 
 	got := nonStatusMessages(messenger.all())
 	if len(got) != 1 || got[0] != "• synced\n• new tail" {
@@ -3808,7 +3901,7 @@ func TestServicePollDropsSuspiciousNearBaselineReplayEvenAfterBusySeen(t *testin
 	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
 		t.Fatalf("outputBuffer = %q, want suspicious near-baseline replay dropped", got)
 	}
-	if got := rt.baseText; got != currFullText {
+	if got, want := rt.baseText, tmuxctl.NormalizeSnapshot(currFullText); got != want {
 		t.Fatalf("baseText = %q, want current snapshot adopted as anchor", got)
 	}
 	if rt.runBusySeen {
@@ -3868,7 +3961,7 @@ func TestServicePollRecoversWindowDeltaFromSuspiciousNearBaselineReplay(t *testi
 	if got := strings.Trim(rt.outputBuffer, "\n"); got != "• 我按你选的 1 继续，把这 4 份中文稿统一润色成更正式的对外文风。" {
 		t.Fatalf("outputBuffer = %q, want recovered new tail", got)
 	}
-	if got := rt.baseText; got != currFullText {
+	if got, want := rt.baseText, tmuxctl.NormalizeSnapshot(currFullText); got != want {
 		t.Fatalf("baseText = %q, want current snapshot adopted as anchor", got)
 	}
 }
@@ -4978,6 +5071,37 @@ func TestSplitByRunesRespectsTelegramSafeChunkSize(t *testing.T) {
 		if got := utf8.RuneCountInString(chunk); got > maxMessageRunes {
 			t.Fatalf("chunk %d size = %d, want <= %d", i, got, maxMessageRunes)
 		}
+	}
+}
+
+func TestServiceThrottlesOutputTracePerMessage(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, logger)
+	rt := &groupRuntime{
+		opts:  svc.opts,
+		runID: 1,
+	}
+
+	now := time.Now()
+	svc.logOutputTrace(rt, "trace output retry", now)
+	svc.logOutputTrace(rt, "trace detached retry", now.Add(100*time.Millisecond))
+	svc.logOutputTrace(rt, "trace output retry", now.Add(200*time.Millisecond))
+	svc.logOutputTrace(rt, "trace detached retry", now.Add(300*time.Millisecond))
+
+	got := logs.String()
+	if count := strings.Count(got, "trace output retry"); count != 1 {
+		t.Fatalf("trace output retry log count = %d, want 1; logs=%q", count, got)
+	}
+	if count := strings.Count(got, "trace detached retry"); count != 1 {
+		t.Fatalf("trace detached retry log count = %d, want 1; logs=%q", count, got)
+	}
+
+	svc.logOutputTrace(rt, "trace output retry", now.Add(outputTraceLogEvery+time.Millisecond))
+	if count := strings.Count(logs.String(), "trace output retry"); count != 2 {
+		t.Fatalf("trace output retry log count after interval = %d, want 2; logs=%q", count, logs.String())
 	}
 }
 
