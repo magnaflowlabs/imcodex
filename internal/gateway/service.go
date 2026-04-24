@@ -178,6 +178,7 @@ type groupRuntime struct {
 	outputMessages         []trackedMessage
 	statusMessage          trackedMessage
 	detachedOutputs        []detachedOutput
+	detachedBaselineByRun  map[uint64]string
 	outputBackoffUntil     time.Time
 	detachedBackoffUntil   time.Time
 	detachedRetryCount     int
@@ -2102,6 +2103,7 @@ func (s *Service) detachBufferedOutput(rt *groupRuntime) {
 	rt.clearOutputBuffer()
 	// Keep delivery baseline aligned with detached handoff.
 	rt.outputText = candidate
+	rt.noteDetachedBaseline(runID, candidate)
 	rt.outputMessages = nil
 	rt.editBackoffUntil = time.Time{}
 	rt.detachedRetryCount = 0
@@ -2257,27 +2259,34 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 		runID = rt.nextRunID
 	}
 	if len(rt.detachedOutputs) > 0 {
-		candidateText := mergeBufferedOutput(rt.outputText, raw)
-		text := strings.Trim(raw, "\n")
+		baseline := mergeBufferedOutput(rt.outputText, rt.detachedBaseline(runID))
+		candidateText := mergeBufferedOutput(baseline, raw)
+		text := unsentOutputDelta(baseline, candidateText)
 		if strings.TrimSpace(text) == "" {
+			rt.outputText = candidateText
+			rt.noteDetachedBaseline(runID, candidateText)
 			return
 		}
 		rt.enqueueDetachedOutput(runID, text)
 		// Advance observed delivery baseline once accepted into detached queue.
 		// This avoids replaying the same chunk on pane reset jitter.
 		rt.outputText = candidateText
+		rt.noteDetachedBaseline(runID, candidateText)
 		s.logOutputStateDebug(rt, "flush redirected to detached queue while backlog exists")
 		return
 	}
 	if editable == nil {
-		candidateText := mergeBufferedOutput(rt.outputText, raw)
-		text := strings.Trim(raw, "\n")
+		baseline := mergeBufferedOutput(rt.outputText, rt.detachedBaseline(runID))
+		candidateText := mergeBufferedOutput(baseline, raw)
+		text := unsentOutputDelta(baseline, candidateText)
 		if strings.TrimSpace(text) == "" {
 			rt.outputText = candidateText
+			rt.noteDetachedBaseline(runID, candidateText)
 			return
 		}
 		rt.enqueueDetachedOutput(runID, text)
 		rt.outputText = candidateText
+		rt.noteDetachedBaseline(runID, candidateText)
 		rt.editRateLimitCount = 0
 		s.logOutputStateDebug(rt, "flush plain output redirected to detached queue")
 		s.flushDetachedOutputs(rt)
@@ -2437,6 +2446,27 @@ func mergeBufferedOutput(existing string, delta string) string {
 		return existing + delta[overlap:]
 	}
 	return existing + delta
+}
+
+func unsentOutputDelta(baseline string, candidate string) string {
+	baseline = strings.Trim(baseline, "\n")
+	candidate = strings.Trim(candidate, "\n")
+	if strings.TrimSpace(candidate) == "" || candidate == baseline {
+		return ""
+	}
+	if baseline == "" {
+		return candidate
+	}
+	if strings.HasPrefix(candidate, baseline) {
+		return strings.Trim(candidate[len(baseline):], "\n")
+	}
+	if strings.Contains(baseline, candidate) {
+		return ""
+	}
+	if overlap := tmuxctl.SuffixPrefixOverlap(baseline, candidate); usableMergeOverlap(baseline, candidate, overlap) {
+		return strings.Trim(candidate[overlap:], "\n")
+	}
+	return candidate
 }
 
 func usableMergeOverlap(existing string, delta string, overlap int) bool {
@@ -2623,6 +2653,28 @@ func (rt *groupRuntime) applyOutputBackoff(retryAfter time.Duration) {
 	if retryAt.After(rt.outputBackoffUntil) {
 		rt.outputBackoffUntil = retryAt
 	}
+}
+
+func (rt *groupRuntime) detachedBaseline(runID uint64) string {
+	if rt == nil || runID == 0 || len(rt.detachedBaselineByRun) == 0 {
+		return ""
+	}
+	return rt.detachedBaselineByRun[runID]
+}
+
+func (rt *groupRuntime) noteDetachedBaseline(runID uint64, text string) {
+	if rt == nil || runID == 0 {
+		return
+	}
+	text = strings.Trim(text, "\n")
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if rt.detachedBaselineByRun == nil {
+		rt.detachedBaselineByRun = make(map[uint64]string)
+	}
+	current := rt.detachedBaselineByRun[runID]
+	rt.detachedBaselineByRun[runID] = mergeBufferedOutput(current, text)
 }
 
 func (rt *groupRuntime) workingBackoffActive(now time.Time) bool {
