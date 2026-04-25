@@ -3026,23 +3026,18 @@ func TestServiceResetBufferedOutputReplacesActiveRewriteInsteadOfAppending(t *te
 	}
 }
 
-func TestGroupRuntimeDeduplicatesDetachedChunksForSameRun(t *testing.T) {
+func TestGroupRuntimeAllowsRepeatedDetachedChunksForSameRun(t *testing.T) {
 	t.Parallel()
 
 	rt := &groupRuntime{}
-	text := strings.Repeat("a", maxDetachedMessageRunes) + strings.Repeat("b", 17)
+	text := strings.Repeat("a", maxDetachedMessageRunes*2)
 
 	rt.enqueueDetachedOutput(7, text)
 	if got := len(rt.detachedOutputs); got != 2 {
 		t.Fatalf("len(detachedOutputs) = %d, want 2", got)
 	}
-	rt.enqueueDetachedOutput(7, text)
-	if got := len(rt.detachedOutputs); got != 2 {
-		t.Fatalf("len(detachedOutputs) after duplicate = %d, want 2", got)
-	}
-	rt.enqueueDetachedOutput(8, text)
-	if got := len(rt.detachedOutputs); got != 4 {
-		t.Fatalf("len(detachedOutputs) for different run = %d, want 4", got)
+	if rt.detachedOutputs[0].text != rt.detachedOutputs[1].text {
+		t.Fatalf("detached chunks differ, want repeated equal chunks preserved")
 	}
 }
 
@@ -3101,6 +3096,77 @@ func TestServiceFlushOutputBufferQueuesOnlyTailPastDetachedBaseline(t *testing.T
 	}
 	if got := rt.outputText; got != baseline+"\n• new tail" {
 		t.Fatalf("outputText = %q, want advanced baseline with tail", got)
+	}
+}
+
+func TestServiceDetachBufferedOutputSkipsDetachedBaselineReplay(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	baseline := "• observed body"
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		runID:        3,
+		nextRunID:    3,
+		outputBuffer: baseline,
+	}
+	rt.noteDetachedBaseline(3, baseline)
+
+	svc.detachBufferedOutput(rt)
+
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want duplicate baseline not detached", got)
+	}
+	if got := rt.outputText; got != baseline {
+		t.Fatalf("outputText = %q, want baseline restored", got)
+	}
+}
+
+func TestGroupRuntimePrunesDetachedBaselinesWithRunState(t *testing.T) {
+	t.Parallel()
+
+	rt := &groupRuntime{nextRunID: 10}
+	for runID := uint64(1); runID <= 10; runID++ {
+		rt.commitCursor(runID, 1)
+		rt.noteDetachedBaseline(runID, fmt.Sprintf("run %d", runID))
+	}
+
+	rt.pruneRunState(3)
+
+	for _, runID := range []uint64{1, 7} {
+		if _, ok := rt.runCursorCommitted[runID]; ok {
+			t.Fatalf("runCursorCommitted[%d] still present, want pruned", runID)
+		}
+		if _, ok := rt.detachedBaselineByRun[runID]; ok {
+			t.Fatalf("detachedBaselineByRun[%d] still present, want pruned", runID)
+		}
+	}
+	for _, runID := range []uint64{8, 9, 10} {
+		if _, ok := rt.runCursorCommitted[runID]; !ok {
+			t.Fatalf("runCursorCommitted[%d] missing, want kept", runID)
+		}
+		if _, ok := rt.detachedBaselineByRun[runID]; !ok {
+			t.Fatalf("detachedBaselineByRun[%d] missing, want kept", runID)
+		}
+	}
+}
+
+func TestServiceEnsureSessionClearsStaleDetachedBaselineWithoutRecoverableOutput(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:                  svc.opts,
+		session:               svc.opts.SessionName,
+		detachedBaselineByRun: map[uint64]string{3: "stale baseline"},
+	}
+
+	if err := svc.ensureSession(rt); err != nil {
+		t.Fatalf("ensureSession() error = %v", err)
+	}
+
+	if rt.detachedBaselineByRun != nil {
+		t.Fatalf("detachedBaselineByRun = %#v, want cleared for fresh session", rt.detachedBaselineByRun)
 	}
 }
 

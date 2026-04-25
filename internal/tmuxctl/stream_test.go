@@ -160,6 +160,17 @@ func TestNormalizeSnapshotDropsModelStatusWithoutPercent(t *testing.T) {
 	}
 }
 
+func TestNormalizeSnapshotDropsModelMetadataAndResumeChrome(t *testing.T) {
+	t.Parallel()
+
+	raw := "› hi\n\n⚠ Model metadata for `gpt-5.5` not found. Defaulting to fallback metadata; this\n  can degrade performance and cause issues.\n\n• Hi. What do you need me to check or change next?\n\n╭────────────────────────╮\n│ >_ OpenAI Codex (v0.124.0)\n│ model: gpt-5.5 xhigh /model to change\n│ directory: /data/quant_v3\n╰────────────────────────╯\n\nTip: New Build faster with Codex.\n\nToken usage: total=598,496 input=577,081 output=21,415\nTo continue this session, run codex resume 019dbec9\n\n› Implement {feature}"
+	got := NormalizeSnapshot(raw)
+	want := "• Hi. What do you need me to check or change next?"
+	if got != want {
+		t.Fatalf("NormalizeSnapshot() = %q, want %q", got, want)
+	}
+}
+
 func TestIsBusyRecognizesHollowBulletWorkingChrome(t *testing.T) {
 	t.Parallel()
 

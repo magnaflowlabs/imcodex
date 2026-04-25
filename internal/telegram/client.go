@@ -197,7 +197,7 @@ func (c *Client) DownloadMessageResource(ctx context.Context, _ string, _ string
 		return gateway.DownloadedResource{}, fmt.Errorf("telegram file download failed: http=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := gateway.ReadDownloadedResourceBody(resp.Body)
 	if err != nil {
 		return gateway.DownloadedResource{}, fmt.Errorf("read telegram file: %w", err)
 	}
