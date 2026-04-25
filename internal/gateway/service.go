@@ -152,58 +152,60 @@ type activeRequest struct {
 }
 
 type groupRuntime struct {
-	opts                   Options
-	session                string
-	queue                  chan IncomingMessage
-	deliveryDone           chan deliveryCompletion
-	pending                []IncomingMessage
-	active                 *activeRequest
-	outputArmed            bool
-	promptEchoTail         string
-	promptEchoPending      bool
-	runBusySeen            bool
-	runPromptObserved      bool
-	preBusyMutedText       string
-	preBusyMutedChanges    int
-	preBusyMutedStable     int
-	sessionReady           bool
-	lastText               string
-	baseText               string
-	lastBusy               bool
-	idleTicks              int
-	outputBuffer           string
-	outputBufferedAt       time.Time
-	outputBufferedTicks    int
-	lastOutputWatchdogAt   time.Time
-	lastDetachedWatchdogAt time.Time
-	outputTraceAtByKey     map[string]time.Time
-	outputText             string
-	outputMessages         []trackedMessage
-	statusMessage          trackedMessage
-	detachedOutputs        []detachedOutput
-	detachedBaselineByRun  map[uint64]string
-	outputBackoffUntil     time.Time
-	detachedBackoffUntil   time.Time
-	detachedRetryCount     int
-	editBackoffUntil       time.Time
-	editRateLimitCount     int
-	outputDroppedRunID     uint64
-	outputDropReason       string
-	lastEditableSyncAt     time.Time
-	nextDetachedSendAt     time.Time
-	deferBodyUntilIdle     bool
-	monitorExistingSession bool
-	busySince              time.Time
-	workingSent            bool
-	workingBackoffUntil    time.Time
-	lastActionAt           time.Time
-	interruptSentAt        time.Time
-	forceInterruptSent     bool
-	deliveryInFlight       bool
-	outputGeneration       uint64
-	runID                  uint64
-	nextRunID              uint64
-	runCursorCommitted     map[uint64]int
+	opts                    Options
+	session                 string
+	queue                   chan IncomingMessage
+	deliveryDone            chan deliveryCompletion
+	pending                 []IncomingMessage
+	active                  *activeRequest
+	outputArmed             bool
+	promptEchoTail          string
+	promptEchoPending       bool
+	runBusySeen             bool
+	runPromptObserved       bool
+	preBusyMutedText        string
+	preBusyMutedChanges     int
+	preBusyMutedStable      int
+	sessionReady            bool
+	lastText                string
+	baseText                string
+	lastBusy                bool
+	idleTicks               int
+	outputBuffer            string
+	outputBufferedAt        time.Time
+	outputBufferedTicks     int
+	lastOutputWatchdogAt    time.Time
+	lastDetachedWatchdogAt  time.Time
+	lastPassiveResetDropAt  time.Time
+	outputTraceAtByKey      map[string]time.Time
+	outputText              string
+	outputMessages          []trackedMessage
+	statusMessage           trackedMessage
+	detachedOutputs         []detachedOutput
+	detachedBaselineByRun   map[uint64]string
+	outputBackoffUntil      time.Time
+	detachedBackoffUntil    time.Time
+	detachedRetryCount      int
+	editBackoffUntil        time.Time
+	editRateLimitCount      int
+	outputDroppedRunID      uint64
+	outputDropReason        string
+	lastEditableSyncAt      time.Time
+	nextDetachedSendAt      time.Time
+	deferBodyUntilIdle      bool
+	monitorExistingSession  bool
+	passiveRecoveredSession bool
+	busySince               time.Time
+	workingSent             bool
+	workingBackoffUntil     time.Time
+	lastActionAt            time.Time
+	interruptSentAt         time.Time
+	forceInterruptSent      bool
+	deliveryInFlight        bool
+	outputGeneration        uint64
+	runID                   uint64
+	nextRunID               uint64
+	runCursorCommitted      map[uint64]int
 }
 
 type deliveryCompletion struct {
@@ -528,6 +530,7 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	}
 	rt.outputArmed = recoveringOutput || monitorExistingOutput
 	rt.monitorExistingSession = false
+	rt.passiveRecoveredSession = monitorExistingOutput
 	if rt.active == nil {
 		rt.busySince = time.Time{}
 		rt.workingSent = false
@@ -585,6 +588,7 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 			rt.idleTicks = 0
 			rt.lastText = ""
 			rt.outputArmed = false
+			rt.passiveRecoveredSession = false
 			rt.promptEchoTail = ""
 			rt.promptEchoPending = false
 			rt.runBusySeen = false
@@ -698,6 +702,7 @@ func (s *Service) dispatchPreparedAttempt(rt *groupRuntime, req *activeRequest, 
 			rt.lastBusy = false
 			rt.idleTicks = 0
 			rt.outputArmed = false
+			rt.passiveRecoveredSession = false
 			rt.promptEchoTail = ""
 			rt.promptEchoPending = false
 			rt.runBusySeen = false
@@ -732,6 +737,7 @@ func (s *Service) dispatchPreparedAttempt(rt *groupRuntime, req *activeRequest, 
 	rt.lastBusy = true
 	rt.idleTicks = 0
 	rt.outputArmed = true
+	rt.passiveRecoveredSession = false
 	rt.promptEchoTail = normalizePromptEchoTail(req.input)
 	rt.promptEchoPending = rt.promptEchoTail != ""
 	rt.runBusySeen = false
@@ -984,6 +990,17 @@ func (s *Service) poll(rt *groupRuntime) {
 		knownOutput := mergeBufferedOutput(rt.publishedOutputText(), rt.outputBuffer)
 		if tail, ok := unsyncedVisibleTail(knownOutput, currText); ok {
 			delta = tail
+		}
+	}
+	if rt.outputArmed && rt.passiveRecoveredSession && rt.active == nil && reset {
+		knownOutput := mergeBufferedOutput(rt.publishedOutputText(), rt.outputBuffer)
+		if tail, ok := unsyncedVisibleTail(knownOutput, currText); ok {
+			delta = tail
+			reset = false
+		} else {
+			s.dropPassiveRecoveryReset(rt, now, currText)
+			delta = ""
+			reset = false
 		}
 	}
 	if rt.outputArmed && rt.active != nil && !rt.runBusySeen {
@@ -1671,6 +1688,29 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 	}
 	rt.replaceOutputBuffer(mergeBufferedOutput(rt.outputBuffer, delta), now)
 	return true
+}
+
+func (s *Service) dropPassiveRecoveryReset(rt *groupRuntime, now time.Time, currText string) {
+	if rt == nil {
+		return
+	}
+	if rt.lastPassiveResetDropAt.IsZero() || now.Sub(rt.lastPassiveResetDropAt) >= outputWatchdogLogEvery {
+		s.logger.Warn(
+			"dropping passive recovery reset output",
+			"group_id", rt.opts.GroupID,
+			"run_id", rt.runID,
+			"curr_len", utf8.RuneCountInString(strings.Trim(currText, "\n")),
+			"published_len", utf8.RuneCountInString(strings.Trim(rt.publishedOutputText(), "\n")),
+			"buffer_len", utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")),
+		)
+		rt.lastPassiveResetDropAt = now
+	}
+	rt.clearOutputBuffer()
+	rt.outputText = ""
+	rt.outputMessages = nil
+	rt.statusMessage = trackedMessage{}
+	rt.detachedOutputs = nil
+	rt.detachedBaselineByRun = nil
 }
 
 func (rt *groupRuntime) resetWindowAlreadyObserved(knownText string, currText string, now time.Time) bool {
