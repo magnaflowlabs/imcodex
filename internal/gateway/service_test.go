@@ -2578,6 +2578,48 @@ func TestServicePollDuringDeferredBodyUntilIdleDropsSnapshot(t *testing.T) {
 	}
 }
 
+func TestServicePollRecoversUnsyncedVisibleTailWhenSnapshotAlreadyAdvanced(t *testing.T) {
+	t.Parallel()
+
+	base := "• previous run"
+	visible := "• first chunk\n\n• second chunk"
+	snapshot := base + "\n\n" + visible + "\n\n• Working (2s • esc to interrupt)"
+	console := &fakeConsole{captures: []string{snapshot}}
+	messenger := &fakeEditableMessenger{
+		messages: []trackedMessage{
+			{messageID: "1", text: "• first chunk"},
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.busyFlushAfter = time.Hour
+	svc.flushIdleTicks = 100
+
+	rt := &groupRuntime{
+		opts:           svc.opts,
+		session:        svc.opts.SessionName,
+		sessionReady:   true,
+		outputArmed:    true,
+		runID:          8,
+		nextRunID:      8,
+		baseText:       base,
+		lastText:       base + "\n\n" + visible,
+		lastBusy:       true,
+		runBusySeen:    true,
+		outputText:     "• first chunk",
+		outputMessages: []trackedMessage{{messageID: "1", text: "• first chunk"}},
+		active:         &activeRequest{messageID: "om_1", input: "work"},
+	}
+
+	svc.poll(rt)
+
+	if got := strings.TrimSpace(rt.outputBuffer); got != "• second chunk" {
+		t.Fatalf("outputBuffer = %q, want recovered unsynced tail", got)
+	}
+	if got := len(nonStatusMessages(messenger.all())); got != 1 {
+		t.Fatalf("messages = %#v, want no immediate send before flush cadence", messenger.all())
+	}
+}
+
 func TestServiceDetachedOutputDropsRemainingChunkAfterRateLimit(t *testing.T) {
 	t.Parallel()
 
