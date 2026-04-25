@@ -935,6 +935,12 @@ func (s *Service) poll(rt *groupRuntime) {
 		idleConfirmTicks = 1
 	}
 	delta, reset := tmuxctl.DiffText(prevText, currText)
+	if rt.outputArmed && !reset && strings.TrimSpace(delta) == "" {
+		knownOutput := mergeBufferedOutput(rt.publishedOutputText(), rt.outputBuffer)
+		if tail, ok := unsyncedVisibleTail(knownOutput, currText); ok {
+			delta = tail
+		}
+	}
 	if rt.outputArmed && rt.active != nil && !rt.runBusySeen {
 		if busyRaw {
 			rt.runBusySeen = true
@@ -2501,6 +2507,32 @@ func unsentOutputDelta(baseline string, candidate string) string {
 		return strings.Trim(candidate[overlap:], "\n")
 	}
 	return candidate
+}
+
+func unsyncedVisibleTail(known string, visible string) (string, bool) {
+	known = strings.Trim(known, "\n")
+	visible = strings.Trim(visible, "\n")
+	if strings.TrimSpace(known) == "" || strings.TrimSpace(visible) == "" {
+		return "", false
+	}
+	if visible == known || strings.Contains(known, visible) {
+		return "", false
+	}
+	if strings.HasPrefix(visible, known) {
+		tail := strings.Trim(visible[len(known):], "\n")
+		return tail, strings.TrimSpace(tail) != ""
+	}
+	if idx := strings.Index(visible, known); idx >= 0 {
+		if idx == 0 || visible[idx-1] == '\n' {
+			tail := strings.Trim(visible[idx+len(known):], "\n")
+			return tail, strings.TrimSpace(tail) != ""
+		}
+	}
+	if overlap := tmuxctl.SuffixPrefixOverlap(known, visible); usableMergeOverlap(known, visible, overlap) {
+		tail := strings.Trim(visible[overlap:], "\n")
+		return tail, strings.TrimSpace(tail) != ""
+	}
+	return "", false
 }
 
 func outputDeliveryTooLarge(text string) bool {
