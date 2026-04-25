@@ -81,19 +81,22 @@ Replacement startup flags:
 
 ## Stable Codex Version
 
-The Docker runtime for `v2.2.16` pins Codex CLI `0.120.0`.
+The Docker runtime for `v2.2.17` pins Codex CLI `0.120.0`.
 
 That version is baked into the local `stable` image build. This avoids live
 interactive upgrade prompts during production traffic.
 
-For host runtime, persist the same guard before starting `imcodex`:
+For host runtime, persist the same guard before starting `imcodex` or any
+unattended `codex` pane:
 
 ```bash
 echo 'export NO_UPDATE_NOTIFIER=1' >> ~/.zshrc
 ```
 
 Restart the shell, or export it in the current shell first. The managed Codex
-launcher defaults `NO_UPDATE_NOTIFIER` to `1` when it invokes Codex.
+launcher defaults `NO_UPDATE_NOTIFIER` to `1` when it invokes Codex, but setting
+it in the login shell prevents manual panes from upgrading before `imcodex`
+attaches to them.
 
 If Codex shows `Model metadata ... not found` after a model change such as
 `gpt-5.4` to `gpt-5.5`, update/pin a Codex CLI version that knows the model.

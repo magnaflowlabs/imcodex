@@ -19,32 +19,32 @@ import (
 )
 
 const (
-	maxMessageRunes            = 3000
-	maxDetachedMessageRunes    = 4096
-	queueSize                  = 64
-	recentMessageIDLimit       = 256
-	defaultPollEvery           = 100 * time.Millisecond
-	defaultFlushIdleTicks      = 24
-	defaultIdleConfirmTicks    = 3
-	defaultWorkingAfter        = time.Second
-	defaultChatActionEvery     = 4 * time.Second
-	defaultBusyFlushAfter      = time.Second
-	defaultOutputWatchdog      = 8 * time.Second
-	defaultDetachedWatchdog    = 15 * time.Second
-	defaultWatchdogDetachAfter = 30 * time.Second
-	defaultEditRolloverAt      = 2800
-	defaultEditableSyncEvery   = time.Second
-	defaultDetachedSendEvery   = time.Second
-	detachedCatchUpSendEvery   = time.Second
-	defaultDeliveryTimeout     = 20 * time.Second
-	defaultSilentBusyGrace     = 20 * time.Minute
-	defaultPromptConfirmWait   = 500 * time.Millisecond
-	defaultPromptConfirmEvery  = 50 * time.Millisecond
-	outputWatchdogLogEvery     = 5 * time.Second
-	outputTraceLogEvery        = 5 * time.Second
-	severeEditRetryAfter       = 30 * time.Second
-	repeatedEditRetryAfter     = 10 * time.Second
-	workingStatusText          = "[working] Codex is processing."
+	maxMessageRunes           = 3000
+	maxDetachedMessageRunes   = 4096
+	queueSize                 = 64
+	recentMessageIDLimit      = 256
+	defaultPollEvery          = 100 * time.Millisecond
+	defaultFlushIdleTicks     = 24
+	defaultIdleConfirmTicks   = 3
+	defaultWorkingAfter       = time.Second
+	defaultChatActionEvery    = 4 * time.Second
+	defaultBusyFlushAfter     = time.Second
+	defaultOutputWatchdog     = 8 * time.Second
+	defaultDetachedWatchdog   = 15 * time.Second
+	defaultEditRolloverAt     = 2800
+	defaultEditableSyncEvery  = time.Second
+	defaultDetachedSendEvery  = time.Second
+	detachedCatchUpSendEvery  = time.Second
+	defaultDeliveryTimeout    = 20 * time.Second
+	defaultSilentBusyGrace    = 20 * time.Minute
+	defaultPromptConfirmWait  = 500 * time.Millisecond
+	defaultPromptConfirmEvery = 50 * time.Millisecond
+	outputWatchdogLogEvery    = 5 * time.Second
+	outputTraceLogEvery       = 5 * time.Second
+	maxOutputDeliveryRunes    = maxMessageRunes * 8
+	maxDetachedQueueItems     = 8
+	maxDetachedQueueRunes     = maxDetachedMessageRunes * maxDetachedQueueItems
+	workingStatusText         = "[working] Codex is processing."
 )
 
 type IncomingMessage struct {
@@ -126,7 +126,6 @@ type Service struct {
 	busyFlushAfter        time.Duration
 	outputWatchdogAfter   time.Duration
 	detachedWatchdogAfter time.Duration
-	watchdogDetachAfter   time.Duration
 	editRolloverAt        int
 	editableSyncEvery     time.Duration
 	detachedSendEvery     time.Duration
@@ -184,10 +183,11 @@ type groupRuntime struct {
 	detachedRetryCount     int
 	editBackoffUntil       time.Time
 	editRateLimitCount     int
+	outputDroppedRunID     uint64
+	outputDropReason       string
 	lastEditableSyncAt     time.Time
 	nextDetachedSendAt     time.Time
 	deferBodyUntilIdle     bool
-	forcePlainOutput       bool
 	busySince              time.Time
 	workingSent            bool
 	workingBackoffUntil    time.Time
@@ -249,7 +249,6 @@ func NewService(ctx context.Context, opts Options, messenger Messenger, console 
 		busyFlushAfter:        defaultBusyFlushAfter,
 		outputWatchdogAfter:   defaultOutputWatchdog,
 		detachedWatchdogAfter: defaultDetachedWatchdog,
-		watchdogDetachAfter:   defaultWatchdogDetachAfter,
 		editRolloverAt:        defaultEditRolloverAt,
 		editableSyncEvery:     defaultEditableSyncEvery,
 		detachedSendEvery:     defaultDetachedSendEvery,
@@ -479,8 +478,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.detachedRetryCount = 0
 		rt.editBackoffUntil = time.Time{}
 		rt.editRateLimitCount = 0
+		rt.clearOutputDropState()
 		rt.deferBodyUntilIdle = false
-		rt.forcePlainOutput = false
 		rt.workingBackoffUntil = time.Time{}
 	}
 	rt.outputArmed = recoveringOutput
@@ -557,8 +556,8 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 			rt.detachedRetryCount = 0
 			rt.editBackoffUntil = time.Time{}
 			rt.editRateLimitCount = 0
+			rt.clearOutputDropState()
 			rt.deferBodyUntilIdle = false
-			rt.forcePlainOutput = false
 			rt.busySince = time.Time{}
 			rt.workingSent = false
 			rt.lastActionAt = time.Time{}
@@ -595,6 +594,10 @@ func (s *Service) finalizeOutputBeforeDispatch(rt *groupRuntime) bool {
 	}
 	currText := tmuxctl.SliceAfter(rt.baseText, currFullText)
 	currText = strings.Trim(currText, "\n")
+	if rt.isDroppingCurrentRunOutput() {
+		s.dropOutputForRun(rt, rt.currentRunID(), "finalize skipped dropped run output", time.Now())
+		return true
+	}
 	// If a run is still in-flight but boundary capture currently shows no tail,
 	// defer dispatch and let poll confirm idle over multiple ticks.
 	if strings.TrimSpace(currText) == "" && rt.active != nil {
@@ -666,8 +669,8 @@ func (s *Service) dispatchPreparedAttempt(rt *groupRuntime, req *activeRequest, 
 			rt.detachedRetryCount = 0
 			rt.editBackoffUntil = time.Time{}
 			rt.editRateLimitCount = 0
+			rt.clearOutputDropState()
 			rt.deferBodyUntilIdle = false
-			rt.forcePlainOutput = false
 			rt.busySince = time.Time{}
 			rt.workingSent = false
 			rt.workingBackoffUntil = time.Time{}
@@ -693,9 +696,9 @@ func (s *Service) dispatchPreparedAttempt(rt *groupRuntime, req *activeRequest, 
 	rt.outputText = ""
 	rt.editBackoffUntil = time.Time{}
 	rt.editRateLimitCount = 0
+	rt.clearOutputDropState()
 	rt.lastEditableSyncAt = time.Time{}
 	rt.deferBodyUntilIdle = false
-	rt.forcePlainOutput = false
 	rt.busySince = time.Now()
 	rt.workingSent = false
 	rt.workingBackoffUntil = time.Time{}
@@ -1013,11 +1016,12 @@ func (s *Service) poll(rt *groupRuntime) {
 
 	deferSnapshotCommit := false
 	if rt.outputArmed {
-		if s.shouldDeferBodyFlush(rt, now) {
-			// During editable backoff, keep reconciling against the last
-			// successfully published body so a later plain-send fallback can
-			// forward only the unsent tail instead of replaying the whole body.
-			s.reconcileDeferredOutput(rt, currText, now)
+		if rt.isDroppingCurrentRunOutput() {
+			s.dropOutputForRun(rt, rt.currentRunID(), "poll skipped dropped run output", now)
+		} else if s.shouldDeferBodyFlush(rt, now) {
+			// During output backoff, discard the current run body instead of
+			// accumulating a backlog that could later amplify Telegram sends.
+			s.dropOutputForRun(rt, rt.currentRunID(), "poll observed output during editable backoff", now)
 		} else {
 			if reset {
 				if !s.resetBufferedOutput(rt, currText) {
@@ -1027,6 +1031,9 @@ func (s *Service) poll(rt *groupRuntime) {
 				}
 			} else {
 				rt.appendOutputBuffer(delta, now)
+			}
+			if outputDeliveryTooLarge(mergeBufferedOutput(rt.outputText, rt.outputBuffer)) {
+				s.dropOutputForRun(rt, rt.currentRunID(), "captured output exceeds safety cap", now)
 			}
 		}
 		if rt.hasBufferedOutput() {
@@ -1206,7 +1213,8 @@ func (s *Service) promoteStablePreBusyMutedOutput(rt *groupRuntime, now time.Tim
 			"text_len", len(candidate),
 		)
 	}
-	if rt.hasBufferedOutput() ||
+	if rt.isDroppingCurrentRunOutput() ||
+		rt.hasBufferedOutput() ||
 		strings.TrimSpace(rt.outputText) != "" ||
 		len(rt.outputMessages) > 0 ||
 		len(rt.detachedOutputs) > 0 {
@@ -1216,7 +1224,7 @@ func (s *Service) promoteStablePreBusyMutedOutput(rt *groupRuntime, now time.Tim
 }
 
 func (s *Service) shouldDeferBodyFlush(rt *groupRuntime, now time.Time) bool {
-	if rt == nil || rt.forcePlainOutput || !rt.deferBodyUntilIdle {
+	if rt == nil || !rt.deferBodyUntilIdle {
 		return false
 	}
 	if !rt.editBackoffUntil.IsZero() && rt.editBackoffUntil.After(now) {
@@ -1524,14 +1532,14 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 				currLen := utf8.RuneCountInString(currText)
 				bufferLen := utf8.RuneCountInString(bufferText)
 				if currLen < bufferLen && strings.HasPrefix(bufferText, currText) {
-					if rt.forcePlainOutput || len(rt.detachedOutputs) > 0 {
+					if len(rt.detachedOutputs) > 0 {
 						rt.outputText = bufferText
 						rt.clearOutputBuffer()
 						return true
 					}
 					return false
 				}
-				if currLen <= bufferLen && (rt.forcePlainOutput || len(rt.detachedOutputs) > 0) {
+				if currLen <= bufferLen && len(rt.detachedOutputs) > 0 {
 					rt.outputText = bufferText
 					rt.clearOutputBuffer()
 					return true
@@ -1574,14 +1582,14 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 			trimmedKnownText := strings.Trim(knownText, "\n")
 			knownLen := utf8.RuneCountInString(trimmedKnownText)
 			if currLen < knownLen && strings.HasPrefix(trimmedKnownText, currText) {
-				if rt.forcePlainOutput || len(rt.detachedOutputs) > 0 {
+				if len(rt.detachedOutputs) > 0 {
 					rt.outputText = trimmedKnownText
 					rt.clearOutputBuffer()
 					return true
 				}
 				return false
 			}
-			if currLen <= knownLen && (rt.forcePlainOutput || len(rt.detachedOutputs) > 0) {
+			if currLen <= knownLen && len(rt.detachedOutputs) > 0 {
 				rt.outputText = trimmedKnownText
 				rt.clearOutputBuffer()
 				return true
@@ -2107,8 +2115,8 @@ func (s *Service) prepareOutputForDispatch(rt *groupRuntime) {
 	rt.clearOutputBuffer()
 	rt.outputText = ""
 	rt.editRateLimitCount = 0
+	rt.clearOutputDropState()
 	rt.lastEditableSyncAt = time.Time{}
-	rt.forcePlainOutput = false
 	rt.outputMessages = nil
 	rt.workingBackoffUntil = time.Time{}
 }
@@ -2117,14 +2125,23 @@ func (s *Service) detachBufferedOutput(rt *groupRuntime) {
 	if rt == nil {
 		return
 	}
-	runID := rt.runID
-	if runID == 0 {
-		runID = rt.nextRunID
+	runID := rt.currentRunID()
+	if rt.isDroppingCurrentRunOutput() {
+		s.dropOutputForRun(rt, runID, "current run output already dropped", time.Now())
+		return
 	}
 	baseline := mergeBufferedOutput(rt.outputText, rt.detachedBaseline(runID))
 	candidate := mergeBufferedOutput(baseline, rt.outputBuffer)
+	if outputDeliveryTooLarge(candidate) {
+		s.dropOutputForRun(rt, runID, "detached handoff exceeds safety cap", time.Now())
+		return
+	}
 	unsent := unsentOutputDelta(baseline, candidate)
 	if strings.TrimSpace(unsent) != "" {
+		if detachedQueueWouldExceedLimit(rt.detachedOutputs, unsent) {
+			s.dropOutputForRun(rt, runID, "detached handoff queue exceeds safety cap", time.Now())
+			return
+		}
 		rt.enqueueDetachedOutput(runID, unsent)
 	}
 	rt.clearOutputBuffer()
@@ -2205,48 +2222,22 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 	}
 	now := time.Now()
 	editable := s.editableMessenger()
-	if rt.forcePlainOutput {
-		editable = nil
+	runID := rt.currentRunID()
+	if rt.isDroppingCurrentRunOutput() {
+		s.dropOutputForRun(rt, runID, "current run output already dropped", now)
+		return
 	}
 	if editable != nil && s.shouldDeferBodyFlush(rt, now) {
-		s.logOutputTrace(
-			rt,
-			"flush deferred while editable backoff active",
-			now,
-			"buffer_len",
-			utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")),
-			"output_backoff_until",
-			rt.outputBackoffUntil,
-			"edit_backoff_until",
-			rt.editBackoffUntil,
-			"defer_body_until_idle",
-			rt.deferBodyUntilIdle,
-		)
+		s.dropOutputForRun(rt, runID, "editable output backoff active", now)
 		return
 	}
 	if rt.outputBackoffActive(now) {
-		s.logOutputTrace(
-			rt,
-			"flush blocked by shared output backoff",
-			now,
-			"buffer_len",
-			utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")),
-			"output_backoff_until",
-			rt.outputBackoffUntil,
-		)
+		s.dropOutputForRun(rt, runID, "shared output backoff active", now)
 		return
 	}
 	if editable != nil && !rt.editBackoffUntil.IsZero() {
 		if rt.editBackoffUntil.After(now) {
-			s.logOutputTrace(
-				rt,
-				"flush waiting for editable retry window",
-				now,
-				"buffer_len",
-				utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")),
-				"edit_backoff_until",
-				rt.editBackoffUntil,
-			)
+			s.dropOutputForRun(rt, runID, "editable retry window active", now)
 			return
 		}
 		rt.editBackoffUntil = time.Time{}
@@ -2281,17 +2272,21 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 	if strings.TrimSpace(raw) == "" {
 		return
 	}
-	runID := rt.runID
-	if runID == 0 {
-		runID = rt.nextRunID
-	}
 	if len(rt.detachedOutputs) > 0 {
 		baseline := mergeBufferedOutput(rt.outputText, rt.detachedBaseline(runID))
 		candidateText := mergeBufferedOutput(baseline, raw)
+		if outputDeliveryTooLarge(candidateText) {
+			s.dropOutputForRun(rt, runID, "output body exceeds safety cap", now)
+			return
+		}
 		text := unsentOutputDelta(baseline, candidateText)
 		if strings.TrimSpace(text) == "" {
 			rt.outputText = candidateText
 			rt.noteDetachedBaseline(runID, candidateText)
+			return
+		}
+		if detachedQueueWouldExceedLimit(rt.detachedOutputs, text) {
+			s.dropOutputForRun(rt, runID, "detached output queue exceeds safety cap", now)
 			return
 		}
 		rt.enqueueDetachedOutput(runID, text)
@@ -2305,10 +2300,18 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 	if editable == nil {
 		baseline := mergeBufferedOutput(rt.outputText, rt.detachedBaseline(runID))
 		candidateText := mergeBufferedOutput(baseline, raw)
+		if outputDeliveryTooLarge(candidateText) {
+			s.dropOutputForRun(rt, runID, "plain output body exceeds safety cap", now)
+			return
+		}
 		text := unsentOutputDelta(baseline, candidateText)
 		if strings.TrimSpace(text) == "" {
 			rt.outputText = candidateText
 			rt.noteDetachedBaseline(runID, candidateText)
+			return
+		}
+		if detachedQueueWouldExceedLimit(rt.detachedOutputs, text) {
+			s.dropOutputForRun(rt, runID, "plain detached queue exceeds safety cap", now)
 			return
 		}
 		rt.enqueueDetachedOutput(runID, text)
@@ -2321,6 +2324,10 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 	}
 	candidateText := mergeBufferedOutput(rt.outputText, raw)
 	desiredText := strings.Trim(candidateText, "\n")
+	if outputDeliveryTooLarge(desiredText) {
+		s.dropOutputForRun(rt, runID, "editable output body exceeds safety cap", now)
+		return
+	}
 	if strings.TrimSpace(desiredText) == "" {
 		rt.outputText = candidateText
 		return
@@ -2357,11 +2364,9 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 			s.restoreOutputBufferPrefix(rt, raw, bufferedAt)
 			if retryAfter := retryAfterFromRateLimitError(err); retryAfter > 0 {
 				rt.editRateLimitCount++
-				rt.editBackoffUntil = time.Now().Add(retryAfter)
 				rt.applyOutputBackoff(retryAfter)
-				rt.deferBodyUntilIdle = true
 				s.logger.Warn(
-					"sync editable output rate-limited",
+					"sync editable output rate-limited; dropping current run output",
 					"group_id",
 					rt.opts.GroupID,
 					"run_id",
@@ -2375,26 +2380,22 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 					"err",
 					err,
 				)
-				if shouldFallbackFromEditableRateLimit(rt, retryAfter) {
-					rt.forcePlainOutput = true
-					rt.deferBodyUntilIdle = false
-					s.detachBufferedOutput(rt)
-					s.logger.Warn(
-						"sync editable output switched to detached queue",
-						"group_id",
-						rt.opts.GroupID,
-						"run_id",
-						runID,
-						"cursor",
-						rt.runCursor(runID),
-						"retry_after",
-						retryAfter.String(),
-						"rate_limit_count",
-						rt.editRateLimitCount,
-						"queue_len",
-						len(rt.detachedOutputs),
-					)
-				}
+				s.dropOutputForRun(rt, runID, "editable output rate-limited", time.Now())
+				return
+			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				s.logger.Warn(
+					"sync editable output timed out; dropping current run output",
+					"group_id",
+					rt.opts.GroupID,
+					"run_id",
+					runID,
+					"cursor",
+					rt.runCursor(runID),
+					"err",
+					err,
+				)
+				s.dropOutputForRun(rt, runID, "editable output delivery timed out", time.Now())
 				return
 			}
 			s.logger.Error(
@@ -2415,7 +2416,7 @@ func (s *Service) flushOutputBufferMode(rt *groupRuntime, forceEditable bool) {
 		rt.editRateLimitCount = 0
 		rt.lastEditableSyncAt = now
 		rt.deferBodyUntilIdle = false
-		rt.forcePlainOutput = false
+		rt.clearOutputDropState()
 		s.logOutputTrace(
 			rt,
 			"editable output committed",
@@ -2500,6 +2501,33 @@ func unsentOutputDelta(baseline string, candidate string) string {
 		return strings.Trim(candidate[overlap:], "\n")
 	}
 	return candidate
+}
+
+func outputDeliveryTooLarge(text string) bool {
+	return utf8.RuneCountInString(strings.Trim(text, "\n")) > maxOutputDeliveryRunes
+}
+
+func detachedQueueWouldExceedLimit(items []detachedOutput, text string) bool {
+	queueLen, queueRunes := detachedQueueStats(items)
+	textRunes := utf8.RuneCountInString(strings.Trim(text, "\n"))
+	if textRunes == 0 {
+		return false
+	}
+	chunks := (textRunes + maxDetachedMessageRunes - 1) / maxDetachedMessageRunes
+	return queueLen+chunks > maxDetachedQueueItems || queueRunes+textRunes > maxDetachedQueueRunes
+}
+
+func detachedQueueExceedsLimit(items []detachedOutput) bool {
+	queueLen, queueRunes := detachedQueueStats(items)
+	return queueLen > maxDetachedQueueItems || queueRunes > maxDetachedQueueRunes
+}
+
+func detachedQueueStats(items []detachedOutput) (int, int) {
+	runes := 0
+	for _, item := range items {
+		runes += utf8.RuneCountInString(strings.Trim(item.text, "\n"))
+	}
+	return len(items), runes
 }
 
 func observedWindowTailDelta(known string, snapshot string) (string, bool) {
@@ -2587,18 +2615,12 @@ func parseLeadingInt(text string) int {
 	return n
 }
 
-func shouldFallbackFromEditableRateLimit(rt *groupRuntime, retryAfter time.Duration) bool {
-	if rt == nil || retryAfter <= 0 {
-		return false
-	}
-	if retryAfter >= severeEditRetryAfter {
-		return true
-	}
-	return rt.editRateLimitCount >= 2 && retryAfter >= repeatedEditRetryAfter
-}
-
 func (rt *groupRuntime) appendOutputBuffer(delta string, now time.Time) {
 	if rt == nil || delta == "" {
+		return
+	}
+	if rt.isDroppingCurrentRunOutput() {
+		rt.clearOutputBuffer()
 		return
 	}
 	if rt.outputBuffer == "" && rt.outputBufferedAt.IsZero() {
@@ -2609,6 +2631,10 @@ func (rt *groupRuntime) appendOutputBuffer(delta string, now time.Time) {
 
 func (rt *groupRuntime) replaceOutputBuffer(text string, now time.Time) {
 	if rt == nil {
+		return
+	}
+	if rt.isDroppingCurrentRunOutput() {
+		rt.clearOutputBuffer()
 		return
 	}
 	if text == "" {
@@ -2629,6 +2655,37 @@ func (rt *groupRuntime) clearOutputBuffer() {
 	rt.outputBufferedAt = time.Time{}
 	rt.outputBufferedTicks = 0
 	rt.lastOutputWatchdogAt = time.Time{}
+}
+
+func (rt *groupRuntime) clearOutputDropState() {
+	if rt == nil {
+		return
+	}
+	rt.outputDroppedRunID = 0
+	rt.outputDropReason = ""
+}
+
+func (rt *groupRuntime) currentRunID() uint64 {
+	if rt == nil {
+		return 0
+	}
+	if rt.runID != 0 {
+		return rt.runID
+	}
+	if rt.nextRunID != 0 {
+		return rt.nextRunID
+	}
+	if rt.outputDroppedRunID != 0 {
+		return rt.outputDroppedRunID
+	}
+	return rt.nextRunID
+}
+
+func (rt *groupRuntime) isDroppingCurrentRunOutput() bool {
+	if rt == nil || rt.outputDroppedRunID == 0 {
+		return false
+	}
+	return rt.outputDroppedRunID == rt.currentRunID()
 }
 
 func (rt *groupRuntime) notePreBusyMutedText(text string) {
@@ -2715,6 +2772,73 @@ func (rt *groupRuntime) applyOutputBackoff(retryAfter time.Duration) {
 	}
 }
 
+func (s *Service) dropOutputForRun(rt *groupRuntime, runID uint64, reason string, now time.Time) {
+	if rt == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if runID == 0 {
+		runID = rt.currentRunID()
+	}
+	if runID == 0 {
+		runID = 1
+	}
+	firstDrop := rt.outputDroppedRunID != runID
+	rt.outputDroppedRunID = runID
+	rt.outputDropReason = reason
+	rt.clearOutputBuffer()
+	rt.detachedOutputs = nil
+	rt.detachedBackoffUntil = time.Time{}
+	rt.detachedRetryCount = 0
+	rt.nextDetachedSendAt = time.Time{}
+	rt.deferBodyUntilIdle = false
+	rt.editBackoffUntil = time.Time{}
+	rt.editRateLimitCount = 0
+	rt.lastDetachedWatchdogAt = time.Time{}
+	if !firstDrop {
+		s.logOutputTrace(rt, "output delivery remains dropped", now, "reason", reason)
+		return
+	}
+	s.logger.Warn(
+		"output delivery dropped for current run",
+		"group_id", rt.opts.GroupID,
+		"run_id", runID,
+		"cursor", rt.runCursor(runID),
+		"reason", reason,
+		"output_backoff_until", rt.outputBackoffUntil,
+	)
+}
+
+func (s *Service) dropDetachedBacklog(rt *groupRuntime, runID uint64, reason string, now time.Time) {
+	if rt == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	queueLen, queueRunes := detachedQueueStats(rt.detachedOutputs)
+	rt.detachedOutputs = nil
+	rt.detachedBackoffUntil = time.Time{}
+	rt.detachedRetryCount = 0
+	rt.nextDetachedSendAt = time.Time{}
+	rt.lastDetachedWatchdogAt = time.Time{}
+	if runID != 0 && runID == rt.currentRunID() {
+		s.dropOutputForRun(rt, runID, reason, now)
+		return
+	}
+	s.logger.Warn(
+		"detached output backlog dropped",
+		"group_id", rt.opts.GroupID,
+		"run_id", runID,
+		"reason", reason,
+		"queue_len", queueLen,
+		"queue_runes", queueRunes,
+		"output_backoff_until", rt.outputBackoffUntil,
+	)
+}
+
 func (rt *groupRuntime) detachedBaseline(runID uint64) string {
 	if rt == nil || runID == 0 || len(rt.detachedBaselineByRun) == 0 {
 		return ""
@@ -2785,13 +2909,22 @@ func (rt *groupRuntime) hasPendingOutputDelivery() bool {
 	if rt == nil {
 		return false
 	}
+	now := time.Now()
+	outputBackoff := rt.outputBackoffActive(now)
+	if !rt.detachedBackoffUntil.IsZero() && !rt.detachedBackoffUntil.After(now) {
+		rt.detachedBackoffUntil = time.Time{}
+	}
+	if !rt.editBackoffUntil.IsZero() && !rt.editBackoffUntil.After(now) {
+		rt.editBackoffUntil = time.Time{}
+	}
+	workingBackoff := rt.workingBackoffActive(now)
 	return rt.deliveryInFlight ||
 		rt.hasBufferedOutput() ||
 		len(rt.detachedOutputs) > 0 ||
-		!rt.outputBackoffUntil.IsZero() ||
+		outputBackoff ||
 		!rt.detachedBackoffUntil.IsZero() ||
 		!rt.editBackoffUntil.IsZero() ||
-		!rt.workingBackoffUntil.IsZero()
+		workingBackoff
 }
 
 func joinTrackedMessages(messages []trackedMessage) string {
@@ -2935,16 +3068,14 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 		return
 	}
 	now := time.Now()
+	if detachedQueueExceedsLimit(rt.detachedOutputs) {
+		runID := rt.detachedOutputs[0].runID
+		s.dropDetachedBacklog(rt, runID, "detached queue exceeds safety cap", now)
+		return
+	}
 	if rt.outputBackoffActive(now) {
-		s.logOutputTrace(
-			rt,
-			"detached flush blocked by shared output backoff",
-			now,
-			"queue_len",
-			len(rt.detachedOutputs),
-			"output_backoff_until",
-			rt.outputBackoffUntil,
-		)
+		runID := rt.detachedOutputs[0].runID
+		s.dropDetachedBacklog(rt, runID, "detached flush blocked by shared output backoff", now)
 		return
 	}
 	if s.detachedWatchdogAfter > 0 &&
@@ -3006,11 +3137,9 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 		if err != nil {
 			retryAfter := retryAfterFromRateLimitError(err)
 			if retryAfter > 0 {
-				rt.detachedBackoffUntil = time.Now().Add(retryAfter)
 				rt.applyOutputBackoff(retryAfter)
-				rt.detachedRetryCount = 0
 				s.logger.Warn(
-					"flush detached output rate-limited",
+					"flush detached output rate-limited; dropping backlog",
 					"group_id",
 					rt.opts.GroupID,
 					"run_id",
@@ -3024,6 +3153,22 @@ func (s *Service) flushDetachedOutputs(rt *groupRuntime) {
 					"err",
 					err,
 				)
+				s.dropDetachedBacklog(rt, batch.runID, "detached output rate-limited", time.Now())
+				return
+			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				s.logger.Warn(
+					"flush detached output timed out; dropping backlog",
+					"group_id",
+					rt.opts.GroupID,
+					"run_id",
+					batch.runID,
+					"cursor",
+					batch.cursor,
+					"err",
+					err,
+				)
+				s.dropDetachedBacklog(rt, batch.runID, "detached output delivery timed out", time.Now())
 				return
 			}
 			rt.detachedRetryCount++
@@ -3251,6 +3396,10 @@ func (s *Service) restoreOutputBufferPrefix(rt *groupRuntime, prefix string, buf
 	if rt == nil || strings.TrimSpace(prefix) == "" {
 		return
 	}
+	if rt.isDroppingCurrentRunOutput() {
+		rt.clearOutputBuffer()
+		return
+	}
 	rt.outputBuffer = prefix + rt.outputBuffer
 	switch {
 	case rt.outputBufferedAt.IsZero():
@@ -3268,20 +3417,6 @@ func (s *Service) canSyncEditableOutput(rt *groupRuntime, now time.Time, force b
 		return true
 	}
 	return now.Sub(rt.lastEditableSyncAt) >= s.editableSyncEvery
-}
-
-func (s *Service) shouldForceWatchdogDetach(rt *groupRuntime, age time.Duration, now time.Time) bool {
-	if rt == nil {
-		return false
-	}
-	if s.watchdogDetachAfter > 0 && age >= s.watchdogDetachAfter {
-		return true
-	}
-	// Extremely large buffered bodies should not stay stuck in editable mode
-	// even if the run is still active; move them to the detached queue and let
-	// the shared output backoff govern actual delivery.
-	return utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")) >= maxMessageRunes*8 &&
-		now.Sub(rt.outputBufferedAt) >= s.outputWatchdogAfter*2
 }
 
 func (s *Service) clearWorkingStatus(rt *groupRuntime) {
