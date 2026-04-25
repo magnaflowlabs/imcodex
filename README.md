@@ -118,8 +118,9 @@ Path fields support:
 
 ## Run
 
-Before starting `imcodex`, disable Codex's interactive update notifier in your
-login shell so unattended sessions do not self-upgrade mid-run:
+Before starting `imcodex` or any unattended `codex` pane, disable Codex's
+interactive update notifier in your login shell so sessions do not self-upgrade
+mid-run:
 
 ```bash
 echo 'export NO_UPDATE_NOTIFIER=1' >> ~/.zshrc
@@ -187,7 +188,7 @@ If you want to prebuild the same image manually:
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.120.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.16 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.17 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -208,6 +209,11 @@ directly and avoids forcing everyone through Docker.
 If you need a pinned, isolated Codex CLI for unattended use, prefer explicit
 `--runtime docker-codex`.
 
+When Codex changes model metadata, for example from `gpt-5.4` to `gpt-5.5`, an
+old resumed pane may stop at the stale session prompt. Update or pin a Codex CLI
+version that knows the model, then start a fresh Codex session with `/new` (or
+reset the tmux session) before putting the group back under unattended traffic.
+
 ## Compatibility
 
 `v2.2` removes these YAML fields:
@@ -224,26 +230,29 @@ and `tmux` session reuse continue to work the same way.
 
 ## Message Delivery
 
-`v2.2.16` keeps host runtime as the default and further hardens Telegram delivery
+`v2.2.17` keeps host runtime as the default and further hardens Telegram delivery
 behavior without changing the public config
 surface:
 
 - outbound send/edit/delete/chat-action calls now use bounded request timeouts
-- tmux output capture now polls at 100ms by default while visible body sync and
-  detached plain sends are paced independently at 1-second defaults
-- detached reply chunks resume in order with a 1-second per-chat spacing and
-  larger plain-message batches to reduce post-run backlog lag
+- tmux output capture now polls at 100ms by default while visible body sync is
+  paced independently at a 1-second default
+- detached plain output remains available for non-editable transports, but
+  Telegram backpressure no longer creates a detached catch-up backlog
 - host runtime now waits for an actual Codex prompt before the first input is
   pasted into a tmux session
-- severe editable `429` responses fall back to detached delivery instead of
-  retrying the same editable body indefinitely
-- detached delivery now tracks per-run observed baselines so pane reset/rewrite
-  jitter cannot enqueue the same already-observed body again
+- editable or detached `429`, delivery timeout, and oversized run output now
+  drop the current run body instead of retrying, writing spill files, or later
+  replaying a backlog
+- detached delivery tracks per-run observed baselines so pane reset/rewrite
+  jitter cannot enqueue the same already-observed body again before a safety
+  drop is triggered
 - editable reply sync no longer bypasses the normal edit throttle on every
   busy-to-idle transition
 - watchdog retries no longer rewrite an editable body into plain detached body
   sends
-- recovery after `429` no longer depends on a later unrelated inbound message
+- recovery after `429` means the next run starts cleanly; dropped body text is
+  intentionally not replayed
 - Telegram/Lark attachments are downloaded with a bounded body-size limit before
   being written to `.imcodex/inbox`
 - delivery tracing now logs why buffered output is waiting, blocked, or
@@ -267,5 +276,5 @@ More detailed runtime notes:
 ## Example Startup Log
 
 ```text
-imcodex 2.2.16 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
+imcodex 2.2.17 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
 ```

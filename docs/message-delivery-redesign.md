@@ -17,6 +17,8 @@ Implemented in the current codebase:
 - no watchdog-triggered rewrite from editable body delivery to plain detached
   body delivery
 - no forced busy-to-idle editable flush that bypasses the normal sync interval
+- current-run body output is dropped on `429`, timeout, or safety-cap overflow
+  instead of being written to files or replayed later
 
 These changes target the worst production amplifiers first:
 
@@ -79,6 +81,7 @@ The redesign is complete when all of these are true:
 
 - a Telegram `429` no longer causes later burst replay of already delivered body
   text
+- a Telegram `429` no longer creates a catch-up backlog for unsent body text
 - body delivery progress is explained by sender state, not by watchdog side
   effects
 - one chat has one serialized outbound pipeline

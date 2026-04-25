@@ -1815,7 +1815,7 @@ func TestMergeBufferedOutputKeepsOnlyTailAfterLargeObservedWindowPrefix(t *testi
 	}
 }
 
-func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
+func TestServiceEditableMessengerDropsOutputAfterRateLimit(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1868,12 +1868,12 @@ func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 		t.Fatalf("len(messages) after early backoff window = %d, want 0 body chunks before retry", got)
 	}
 
-	waitFor(t, 5*time.Second, func() bool {
-		got := nonStatusMessages(messenger.all())
-		return len(got) == 1 && got[0] == "• first\n\n• second"
+	waitFor(t, 2*time.Second, func() bool {
+		return messenger.sendCount() >= 2
 	})
-	if events := strings.Join(messenger.allEvents(), "\n"); !strings.Contains(events, "send:2:• first\n\n• second") {
-		t.Fatalf("events = %#v, want body send retried after retry_after window", messenger.allEvents())
+	time.Sleep(1200 * time.Millisecond)
+	if got := nonStatusMessages(messenger.all()); len(got) != 0 {
+		t.Fatalf("messages = %#v, want no body retry after output drop", got)
 	}
 }
 
@@ -1955,11 +1955,14 @@ func TestServiceEditableRateLimitBlocksDetachedFlushViaSharedOutputBackoff(t *te
 	if after != before {
 		t.Fatalf("detached flush sent during shared backoff: before=%d after=%d", before, after)
 	}
-	if got := len(rt.detachedOutputs); got == 0 {
-		t.Fatalf("len(detachedOutputs) = %d, want queue retained during shared backoff", got)
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want queue dropped during shared backoff", got)
 	}
-	if !rt.deferBodyUntilIdle {
-		t.Fatal("deferBodyUntilIdle = false, want true after editable 429")
+	if rt.deferBodyUntilIdle {
+		t.Fatal("deferBodyUntilIdle = true, want output dropped instead of deferred")
+	}
+	if got, want := rt.outputDroppedRunID, uint64(5); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
 	}
 }
 
@@ -1978,7 +1981,9 @@ func TestServiceDetachedRateLimitBlocksEditableFlushViaSharedOutputBackoff(t *te
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
 	svc.editableSyncEvery = 5 * time.Millisecond
 	rt := &groupRuntime{
-		opts: svc.opts,
+		opts:      svc.opts,
+		runID:     5,
+		nextRunID: 5,
 		outputMessages: []trackedMessage{
 			{messageID: "1", text: "• first"},
 		},
@@ -2000,12 +2005,15 @@ func TestServiceDetachedRateLimitBlocksEditableFlushViaSharedOutputBackoff(t *te
 	if after != before {
 		t.Fatalf("editable flush sent during shared backoff: before=%d after=%d", before, after)
 	}
-	if got := strings.TrimSpace(rt.outputBuffer); got != "• second" {
-		t.Fatalf("outputBuffer = %q, want buffered tail retained while shared backoff active", got)
+	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
+		t.Fatalf("outputBuffer = %q, want buffered tail dropped while shared backoff active", got)
+	}
+	if got, want := rt.outputDroppedRunID, uint64(5); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
 	}
 }
 
-func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *testing.T) {
+func TestServicePlainOutput429DropsRemainingDetachedChunks(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeMessenger{
@@ -2021,7 +2029,6 @@ func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *tes
 		opts:             svc.opts,
 		runID:            6,
 		nextRunID:        6,
-		forcePlainOutput: true,
 		outputBuffer:     strings.Repeat("x", maxDetachedMessageRunes+16),
 		outputBufferedAt: time.Now(),
 	}
@@ -2043,6 +2050,9 @@ func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *tes
 	if rt.outputBackoffUntil.IsZero() {
 		t.Fatal("outputBackoffUntil = zero, want shared backoff after plain 429")
 	}
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) after plain 429 = %d, want dropped backlog", got)
+	}
 
 	svc.flushDetachedOutputs(rt)
 	if got, want := len(messenger.all()), 1; got != want {
@@ -2054,11 +2064,8 @@ func TestServicePlainFallback429KeepsRemainingChunksDetachedWithoutReplay(t *tes
 	svc.flushDetachedOutputs(rt)
 
 	final := messenger.all()
-	if got, want := len(final), 2; got != want {
-		t.Fatalf("len(messages) after detached retry = %d, want %d", got, want)
-	}
-	if got := final[0] + final[1]; got != strings.Repeat("x", maxDetachedMessageRunes+16) {
-		t.Fatalf("reassembled plain fallback output = %q, want exact original text", got)
+	if got, want := len(final), 1; got != want {
+		t.Fatalf("len(messages) after dropped detached retry = %d, want %d", got, want)
 	}
 }
 
@@ -2377,7 +2384,7 @@ func TestServiceRetainsStaleEditableMessagesWhenCleanupRateLimited(t *testing.T)
 	}
 }
 
-func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
+func TestServiceDispatchesNextPromptAfterDroppingBackedOffOutput(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2439,16 +2446,13 @@ func TestServiceDispatchesNextPromptWhileEditableOutputBackedOff(t *testing.T) {
 		t.Fatalf("sendTexts[1] = %q, want %q while prior output is backed off", got, want)
 	}
 
-	waitFor(t, 5*time.Second, func() bool {
-		got := nonStatusMessages(messenger.all())
-		return len(got) >= 1 && strings.Contains(strings.Join(got, "\n"), "• first")
-	})
-	if got := nonStatusMessages(messenger.all()); len(got) == 0 {
-		t.Fatalf("messages = %#v, want detached first output delivered", got)
+	time.Sleep(1200 * time.Millisecond)
+	if got := nonStatusMessages(messenger.all()); len(got) != 0 {
+		t.Fatalf("messages = %#v, want previous output dropped instead of retried", got)
 	}
 }
 
-func TestServiceFlushOutputBufferDefersWhileRunInFlightAfterEditableRateLimit(t *testing.T) {
+func TestServiceFlushOutputBufferDropsWhileRunInFlightAfterEditableRateLimit(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{
@@ -2485,8 +2489,11 @@ func TestServiceFlushOutputBufferDefersWhileRunInFlightAfterEditableRateLimit(t 
 	if after != before {
 		t.Fatalf("editCount = %d (before=%d), want no editable flush while run in-flight and deferBodyUntilIdle=true", after, before)
 	}
-	if got := strings.TrimSpace(rt.outputBuffer); got != "• second" {
-		t.Fatalf("outputBuffer = %q, want preserved while deferred", got)
+	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
+		t.Fatalf("outputBuffer = %q, want dropped while deferred", got)
+	}
+	if got, want := rt.outputDroppedRunID, uint64(7); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
 	}
 }
 
@@ -2526,7 +2533,7 @@ func TestServiceFlushOutputBufferAllowsIdleFlushAfterEditableRateLimit(t *testin
 	}
 }
 
-func TestServicePollDuringDeferredBodyUntilIdleTracksLatestSnapshotOnly(t *testing.T) {
+func TestServicePollDuringDeferredBodyUntilIdleDropsSnapshot(t *testing.T) {
 	t.Parallel()
 
 	console := &fakeConsole{
@@ -2560,15 +2567,18 @@ func TestServicePollDuringDeferredBodyUntilIdleTracksLatestSnapshotOnly(t *testi
 	svc.poll(rt)
 	svc.poll(rt)
 
-	if got, want := strings.TrimSpace(rt.outputBuffer), "• step"; got != want {
-		t.Fatalf("outputBuffer = %q, want latest rewritten snapshot only %q", got, want)
+	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
+		t.Fatalf("outputBuffer = %q, want deferred snapshot dropped", got)
 	}
 	if strings.Contains(rt.outputBuffer, "Running sleep 10") {
 		t.Fatalf("outputBuffer = %q, want transient rewritten lines dropped", rt.outputBuffer)
 	}
+	if got := rt.outputDroppedRunID; got == 0 {
+		t.Fatalf("outputDroppedRunID = %d, want dropped run marked", got)
+	}
 }
 
-func TestServiceDetachedOutputRetriesChunkWithoutReplay(t *testing.T) {
+func TestServiceDetachedOutputDropsRemainingChunkAfterRateLimit(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeMessenger{
@@ -2614,11 +2624,11 @@ func TestServiceDetachedOutputRetriesChunkWithoutReplay(t *testing.T) {
 	svc.flushDetachedOutputs(rt)
 
 	final := messenger.all()
-	if got, want := len(final), 2; got != want {
-		t.Fatalf("len(messages) after retry = %d, want %d", got, want)
+	if got, want := len(final), 1; got != want {
+		t.Fatalf("len(messages) after dropped retry = %d, want %d", got, want)
 	}
-	if got := final[0] + final[1]; got != original {
-		t.Fatalf("reassembled output = %q, want exact original text", got)
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want backlog dropped", got)
 	}
 }
 
@@ -2796,7 +2806,7 @@ func TestServiceFlushOutputBufferRedirectsToDetachedQueueWhenBacklogExists(t *te
 	}
 }
 
-func TestServiceOutputWatchdogKeepsBufferedTailWhenEditBackoffBlocks(t *testing.T) {
+func TestServiceOutputWatchdogDropsBufferedTailWhenEditBackoffBlocks(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{}
@@ -2820,18 +2830,21 @@ func TestServiceOutputWatchdogKeepsBufferedTailWhenEditBackoffBlocks(t *testing.
 
 	svc.applyOutputWatchdog(rt, time.Now())
 
-	if !rt.hasBufferedOutput() {
-		t.Fatalf("outputBuffer = %q, want kept while editable backoff is active", rt.outputBuffer)
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want dropped while editable backoff is active", rt.outputBuffer)
 	}
 	if got := len(rt.detachedOutputs); got != 0 {
-		t.Fatalf("len(detachedOutputs) = %d, want 0 while watchdog waits for editable retry", got)
+		t.Fatalf("len(detachedOutputs) = %d, want 0 after dropping editable backlog", got)
 	}
 	if got := len(nonStatusMessages(messenger.all())); got != 0 {
 		t.Fatalf("messages = %#v, want no detached plain sends while editable backoff is active", messenger.all())
 	}
+	if got, want := rt.outputDroppedRunID, uint64(7); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
+	}
 }
 
-func TestServiceOutputWatchdogKeepsBufferedTailDuringActiveRunWhenEditBackoffBlocks(t *testing.T) {
+func TestServiceOutputWatchdogDropsBufferedTailDuringActiveRunWhenEditBackoffBlocks(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{}
@@ -2859,25 +2872,27 @@ func TestServiceOutputWatchdogKeepsBufferedTailDuringActiveRunWhenEditBackoffBlo
 
 	svc.applyOutputWatchdog(rt, time.Now())
 
-	if !rt.hasBufferedOutput() {
-		t.Fatalf("outputBuffer = %q, want kept for editable retry while run is active", rt.outputBuffer)
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want dropped while editable retry is blocked", rt.outputBuffer)
 	}
 	if got := len(rt.detachedOutputs); got != 0 {
-		t.Fatalf("len(detachedOutputs) = %d, want 0 while active run is in-flight", got)
+		t.Fatalf("len(detachedOutputs) = %d, want 0 after dropping active run backlog", got)
 	}
 	if got := len(nonStatusMessages(messenger.all())); got != 0 {
 		t.Fatalf("messages = %#v, want no detached plain sends during active run", messenger.all())
 	}
+	if got, want := rt.outputDroppedRunID, uint64(7); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
+	}
 }
 
-func TestServiceOutputWatchdogKeepsBufferedTailAfterProlongedEditBackoff(t *testing.T) {
+func TestServiceOutputWatchdogDropsBufferedTailAfterProlongedEditBackoff(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
 	svc.editableSyncEvery = 5 * time.Millisecond
 	svc.outputWatchdogAfter = 10 * time.Millisecond
-	svc.watchdogDetachAfter = 20 * time.Millisecond
 
 	rt := &groupRuntime{
 		opts:               svc.opts,
@@ -2901,24 +2916,23 @@ func TestServiceOutputWatchdogKeepsBufferedTailAfterProlongedEditBackoff(t *test
 
 	svc.applyOutputWatchdog(rt, time.Now())
 
-	if !rt.hasBufferedOutput() {
-		t.Fatalf("outputBuffer = %q, want retained while editable delivery strategy stays unchanged", rt.outputBuffer)
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want dropped while editable backoff is active", rt.outputBuffer)
 	}
 	if got := len(rt.detachedOutputs); got != 0 {
-		t.Fatalf("len(detachedOutputs) = %d, want 0 when watchdog no longer rewrites body strategy", got)
+		t.Fatalf("len(detachedOutputs) = %d, want 0 after dropping backlogged output", got)
 	}
-	if rt.forcePlainOutput {
-		t.Fatal("forcePlainOutput = true, want watchdog to avoid plain fallback mutation")
+	if got, want := rt.outputDroppedRunID, uint64(7); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
 	}
 }
 
-func TestServiceOutputWatchdogKeepsVeryLargeBufferedTailEvenBeforeLongBackoff(t *testing.T) {
+func TestServiceOutputWatchdogDropsVeryLargeBufferedTail(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{}
 	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
 	svc.outputWatchdogAfter = 10 * time.Millisecond
-	svc.watchdogDetachAfter = time.Hour
 
 	rt := &groupRuntime{
 		opts:               svc.opts,
@@ -2937,11 +2951,14 @@ func TestServiceOutputWatchdogKeepsVeryLargeBufferedTailEvenBeforeLongBackoff(t 
 
 	svc.applyOutputWatchdog(rt, time.Now())
 
-	if !rt.hasBufferedOutput() {
-		t.Fatal("outputBuffer cleared, want watchdog to keep large editable backlog buffered")
+	if rt.hasBufferedOutput() {
+		t.Fatal("outputBuffer retained, want watchdog to drop large editable backlog")
 	}
 	if got := len(rt.detachedOutputs); got != 0 {
-		t.Fatalf("len(detachedOutputs) = %d, want 0 when watchdog does not detach editable backlog", got)
+		t.Fatalf("len(detachedOutputs) = %d, want 0 after dropping large editable backlog", got)
+	}
+	if got, want := rt.outputDroppedRunID, uint64(11); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
 	}
 }
 
@@ -3229,7 +3246,7 @@ func TestServiceEnsureSessionClearsStaleDetachedBaselineWithoutRecoverableOutput
 	}
 }
 
-func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testing.T) {
+func TestServiceDropsCurrentRunOutputAfterEditableRateLimit(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{
@@ -3237,7 +3254,6 @@ func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testin
 			{messageID: "1", text: "• synced"},
 		},
 		editErrs: []error{
-			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 2 retry_after=2"),
 			errors.New("telegram api failed: http=429 code=429 desc=Too Many Requests: retry after 2 retry_after=2"),
 		},
 	}
@@ -3258,33 +3274,31 @@ func TestServiceRetainsEditableStrategyAfterRepeatedEditableRateLimits(t *testin
 
 	svc.flushOutputBuffer(rt)
 	applyNextDelivery(t, rt)
-	if rt.forcePlainOutput {
-		t.Fatal("forcePlainOutput = true, want editable retry after first 429")
-	}
-	rt.outputBackoffUntil = time.Time{}
-	rt.editBackoffUntil = time.Time{}
-
-	svc.flushOutputBuffer(rt)
-	applyNextDelivery(t, rt)
-	if rt.forcePlainOutput {
-		t.Fatal("forcePlainOutput = true, want repeated 429s to keep editable strategy")
-	}
-	rt.outputBackoffUntil = time.Time{}
-	rt.editBackoffUntil = time.Time{}
-
-	svc.flushOutputBuffer(rt)
-	applyNextDelivery(t, rt)
 
 	got := nonStatusMessages(messenger.all())
-	if len(got) != 1 || got[0] != "• synced\n• new tail" {
-		t.Fatalf("messages = %#v, want editable body eventually updated in place", got)
+	if len(got) != 1 || got[0] != "• synced" {
+		t.Fatalf("messages = %#v, want previously synced body preserved", got)
 	}
 	if strings.TrimSpace(rt.outputBuffer) != "" {
-		t.Fatalf("outputBuffer = %q, want buffered tail cleared after eventual editable retry", rt.outputBuffer)
+		t.Fatalf("outputBuffer = %q, want buffered tail dropped after editable 429", rt.outputBuffer)
+	}
+	if got, want := rt.outputDroppedRunID, uint64(9); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
+	}
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want no detached fallback", got)
+	}
+
+	rt.outputBackoffUntil = time.Time{}
+	rt.appendOutputBuffer("\n• later tail", time.Now())
+	svc.flushOutputBuffer(rt)
+	got = nonStatusMessages(messenger.all())
+	if len(got) != 1 || got[0] != "• synced" {
+		t.Fatalf("messages = %#v, want dropped run to stay quiet", got)
 	}
 }
 
-func TestServiceFallsBackToDetachedAfterSevereEditableRateLimit(t *testing.T) {
+func TestServiceDoesNotFallbackToDetachedAfterSevereEditableRateLimit(t *testing.T) {
 	t.Parallel()
 
 	messenger := &fakeEditableMessenger{
@@ -3312,29 +3326,100 @@ func TestServiceFallsBackToDetachedAfterSevereEditableRateLimit(t *testing.T) {
 
 	svc.flushOutputBuffer(rt)
 
-	if !rt.forcePlainOutput {
-		t.Fatal("forcePlainOutput = false, want severe editable 429 to switch strategy")
-	}
 	if rt.deferBodyUntilIdle {
-		t.Fatal("deferBodyUntilIdle = true, want detached fallback to clear editable deferral")
+		t.Fatal("deferBodyUntilIdle = true, want output dropped instead of deferred")
 	}
-	if got := len(rt.detachedOutputs); got != 1 {
-		t.Fatalf("len(detachedOutputs) = %d, want 1 queued detached tail", got)
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want no detached fallback", got)
 	}
 	if rt.hasBufferedOutput() {
-		t.Fatalf("outputBuffer = %q, want tail moved into detached queue", rt.outputBuffer)
+		t.Fatalf("outputBuffer = %q, want tail dropped", rt.outputBuffer)
+	}
+	if got, want := rt.outputDroppedRunID, uint64(10); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
 	}
 
 	rt.outputBackoffUntil = time.Time{}
 	svc.flushDetachedOutputs(rt)
 
 	got := nonStatusMessages(messenger.all())
-	if len(got) != 2 || got[0] != "• synced" || got[1] != "• detached tail" {
-		t.Fatalf("messages = %#v, want existing editable body preserved plus detached tail delivery", got)
+	if len(got) != 1 || got[0] != "• synced" {
+		t.Fatalf("messages = %#v, want existing editable body preserved only", got)
 	}
 }
 
-func TestServiceDispatchNextDrainsBufferedTailBeforeRunSwitchEvenDuringEditBackoff(t *testing.T) {
+func TestServiceDropsOversizedEditableOutputWithoutSending(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeEditableMessenger{
+		messages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            12,
+		nextRunID:        12,
+		outputText:       "• synced",
+		outputBuffer:     "\n" + strings.Repeat("x", maxOutputDeliveryRunes+1),
+		outputBufferedAt: time.Now(),
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+	}
+
+	svc.flushOutputBuffer(rt)
+
+	if got := messenger.editCount(); got != 0 {
+		t.Fatalf("editCount = %d, want no send/edit for oversized output", got)
+	}
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want oversized output dropped", rt.outputBuffer)
+	}
+	if got, want := rt.outputDroppedRunID, uint64(12); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
+	}
+}
+
+func TestServiceDropsDetachedQueueWhenAppendingWouldExceedLimit(t *testing.T) {
+	t.Parallel()
+
+	messenger := &fakeMessenger{}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, &fakeConsole{}, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:             svc.opts,
+		runID:            13,
+		nextRunID:        13,
+		outputText:       "• synced",
+		outputBuffer:     "\n• tail",
+		outputBufferedAt: time.Now(),
+	}
+	for i := 0; i < maxDetachedQueueItems; i++ {
+		rt.detachedOutputs = append(rt.detachedOutputs, detachedOutput{
+			runID:  13,
+			cursor: i + 1,
+			text:   "queued",
+		})
+	}
+
+	svc.flushOutputBuffer(rt)
+
+	if got := len(rt.detachedOutputs); got != 0 {
+		t.Fatalf("len(detachedOutputs) = %d, want queue dropped at safety cap", got)
+	}
+	if rt.hasBufferedOutput() {
+		t.Fatalf("outputBuffer = %q, want tail dropped at safety cap", rt.outputBuffer)
+	}
+	if got, want := rt.outputDroppedRunID, uint64(13); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d", got, want)
+	}
+	if got := len(messenger.all()); got != 0 {
+		t.Fatalf("messages = %#v, want no send at queue cap", messenger.all())
+	}
+}
+
+func TestServiceDispatchNextDropsBufferedTailBeforeRunSwitchDuringEditBackoff(t *testing.T) {
 	t.Parallel()
 
 	console := &fakeConsole{captures: []string{""}}
@@ -3365,11 +3450,14 @@ func TestServiceDispatchNextDrainsBufferedTailBeforeRunSwitchEvenDuringEditBacko
 		t.Fatalf("sendTexts = %#v, want next prompt dispatched", sendTexts)
 	}
 	got := nonStatusMessages(messenger.all())
-	if len(got) != 1 || got[0] != "• second tail" {
-		t.Fatalf("messages = %#v, want previous run tail detached and delivered once", got)
+	if len(got) != 0 {
+		t.Fatalf("messages = %#v, want previous run tail dropped", got)
 	}
 	if rt.runID != 4 {
 		t.Fatalf("runID = %d, want switched to new run 4", rt.runID)
+	}
+	if rt.outputDroppedRunID != 0 {
+		t.Fatalf("outputDroppedRunID = %d, want cleared for new run", rt.outputDroppedRunID)
 	}
 }
 
