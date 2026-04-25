@@ -176,7 +176,6 @@ type groupRuntime struct {
 	outputBufferedTicks     int
 	lastOutputWatchdogAt    time.Time
 	lastDetachedWatchdogAt  time.Time
-	lastPassiveResetDropAt  time.Time
 	outputTraceAtByKey      map[string]time.Time
 	outputText              string
 	outputMessages          []trackedMessage
@@ -206,7 +205,7 @@ type groupRuntime struct {
 	runID                   uint64
 	nextRunID               uint64
 	runCursorCommitted      map[uint64]int
-	lastPassiveResetDropKey string
+	passiveResetDropLogged  bool
 }
 
 type deliveryCompletion struct {
@@ -999,7 +998,7 @@ func (s *Service) poll(rt *groupRuntime) {
 			delta = tail
 			reset = false
 		} else {
-			s.dropPassiveRecoveryReset(rt, now, currText)
+			s.dropPassiveRecoveryReset(rt, currText)
 			delta = ""
 			reset = false
 		}
@@ -1691,13 +1690,11 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 	return true
 }
 
-func (s *Service) dropPassiveRecoveryReset(rt *groupRuntime, now time.Time, currText string) {
+func (s *Service) dropPassiveRecoveryReset(rt *groupRuntime, currText string) {
 	if rt == nil {
 		return
 	}
-	dropKey := passiveResetDropKey(currText)
-	if dropKey != rt.lastPassiveResetDropKey &&
-		(rt.lastPassiveResetDropAt.IsZero() || now.Sub(rt.lastPassiveResetDropAt) >= outputWatchdogLogEvery) {
+	if !rt.passiveResetDropLogged {
 		s.logger.Warn(
 			"dropping passive recovery reset output",
 			"group_id", rt.opts.GroupID,
@@ -1706,32 +1703,14 @@ func (s *Service) dropPassiveRecoveryReset(rt *groupRuntime, now time.Time, curr
 			"published_len", utf8.RuneCountInString(strings.Trim(rt.publishedOutputText(), "\n")),
 			"buffer_len", utf8.RuneCountInString(strings.Trim(rt.outputBuffer, "\n")),
 		)
-		rt.lastPassiveResetDropAt = now
+		rt.passiveResetDropLogged = true
 	}
-	rt.lastPassiveResetDropKey = dropKey
 	rt.clearOutputBuffer()
 	rt.outputText = ""
 	rt.outputMessages = nil
 	rt.statusMessage = trackedMessage{}
 	rt.detachedOutputs = nil
 	rt.detachedBaselineByRun = nil
-}
-
-func passiveResetDropKey(text string) string {
-	text = strings.Trim(text, "\n")
-	if text == "" {
-		return "0"
-	}
-	runes := []rune(text)
-	headLen := len(runes)
-	if headLen > 64 {
-		headLen = 64
-	}
-	tailStart := 0
-	if len(runes) > 64 {
-		tailStart = len(runes) - 64
-	}
-	return strconv.Itoa(len(runes)) + ":" + string(runes[:headLen]) + ":" + string(runes[tailStart:])
 }
 
 func (rt *groupRuntime) resetWindowAlreadyObserved(knownText string, currText string, now time.Time) bool {
