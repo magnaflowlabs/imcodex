@@ -105,6 +105,10 @@ type Console interface {
 	ForceInterrupt(ctx context.Context, session string) error
 }
 
+type SessionChecker interface {
+	SessionExists(ctx context.Context, session string) (bool, error)
+}
+
 type ResourceFetcher interface {
 	DownloadMessageResource(ctx context.Context, messageID string, resourceType string, resourceKey string) (DownloadedResource, error)
 }
@@ -188,6 +192,7 @@ type groupRuntime struct {
 	lastEditableSyncAt     time.Time
 	nextDetachedSendAt     time.Time
 	deferBodyUntilIdle     bool
+	monitorExistingSession bool
 	busySince              time.Time
 	workingSent            bool
 	workingBackoffUntil    time.Time
@@ -331,6 +336,14 @@ func (s *Service) forgetMessage(messageID string) {
 }
 
 func (s *Service) ensureRuntime() *groupRuntime {
+	return s.ensureRuntimeWithMonitoring(false)
+}
+
+func (s *Service) startMonitoringExistingSession() *groupRuntime {
+	return s.ensureRuntimeWithMonitoring(true)
+}
+
+func (s *Service) ensureRuntimeWithMonitoring(monitorExisting bool) *groupRuntime {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -339,10 +352,11 @@ func (s *Service) ensureRuntime() *groupRuntime {
 	}
 
 	rt := &groupRuntime{
-		opts:         s.opts,
-		session:      s.opts.SessionName,
-		queue:        make(chan IncomingMessage, queueSize),
-		deliveryDone: make(chan deliveryCompletion, 8),
+		opts:                   s.opts,
+		session:                s.opts.SessionName,
+		queue:                  make(chan IncomingMessage, queueSize),
+		deliveryDone:           make(chan deliveryCompletion, 8),
+		monitorExistingSession: monitorExisting,
 	}
 	s.runtime = rt
 	go s.runGroup(rt)
@@ -383,8 +397,19 @@ func (s *Service) runGroup(rt *groupRuntime) {
 		case <-ticker.C:
 			s.flushDetachedOutputs(rt)
 			if !rt.sessionReady {
-				if !rt.hasRecoverableOutputState() && len(rt.pending) == 0 {
+				if !rt.monitorExistingSession && !rt.hasRecoverableOutputState() && len(rt.pending) == 0 {
 					continue
+				}
+				if rt.monitorExistingSession && len(rt.pending) == 0 && !rt.hasRecoverableOutputState() {
+					exists, err := s.sessionExists(rt.session)
+					if err != nil {
+						s.logger.Warn("check existing session failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
+						continue
+					}
+					if !exists {
+						rt.monitorExistingSession = false
+						continue
+					}
 				}
 				if err := s.ensureSession(rt); err != nil {
 					s.logger.Warn("retry ensure session failed", "group_id", rt.opts.GroupID, "session", rt.session, "err", err)
@@ -404,6 +429,14 @@ func (s *Service) runGroup(rt *groupRuntime) {
 			s.poll(rt)
 		}
 	}
+}
+
+func (s *Service) sessionExists(session string) (bool, error) {
+	checker, ok := s.console.(SessionChecker)
+	if !ok {
+		return false, nil
+	}
+	return checker.SessionExists(s.ctx, session)
 }
 
 func (s *Service) advanceAfterDelivery(rt *groupRuntime) {
@@ -433,13 +466,21 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		!rt.outputBackoffUntil.IsZero() ||
 		!rt.detachedBackoffUntil.IsZero() ||
 		!rt.editBackoffUntil.IsZero()
+	monitorExistingOutput := rt.monitorExistingSession &&
+		len(rt.pending) == 0 &&
+		rt.active == nil &&
+		!recoveringOutput
 
 	_, err := s.console.EnsureSession(s.ctx, s.sessionSpec(rt))
 	if err != nil {
 		return err
 	}
 
-	snapshot, err := s.console.Capture(s.ctx, rt.session, s.history)
+	captureHistory := s.history
+	if monitorExistingOutput {
+		captureHistory = tmuxctl.CaptureRecoveryHistory
+	}
+	snapshot, err := s.console.Capture(s.ctx, rt.session, captureHistory)
 	if err != nil {
 		return err
 	}
@@ -449,6 +490,9 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 	if !recoveringOutput {
 		rt.lastText = captured
 		rt.baseText = ""
+	}
+	if monitorExistingOutput {
+		rt.baseText = captured
 	}
 	rt.lastBusy = busy
 	if recoveringOutput && rt.active != nil {
@@ -482,7 +526,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.deferBodyUntilIdle = false
 		rt.workingBackoffUntil = time.Time{}
 	}
-	rt.outputArmed = recoveringOutput
+	rt.outputArmed = recoveringOutput || monitorExistingOutput
+	rt.monitorExistingSession = false
 	if rt.active == nil {
 		rt.busySince = time.Time{}
 		rt.workingSent = false
