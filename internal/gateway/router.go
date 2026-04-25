@@ -33,6 +33,12 @@ func (r *Router) HandleMessage(ctx context.Context, msg IncomingMessage) error {
 	return service.HandleMessage(ctx, msg)
 }
 
+func (r *Router) Start() {
+	for _, service := range r.services {
+		service.startMonitoringExistingSession()
+	}
+}
+
 func (r *Router) GroupCount() int {
 	return len(r.services)
 }

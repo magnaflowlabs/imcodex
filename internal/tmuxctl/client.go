@@ -115,6 +115,10 @@ func (c *Client) ResetSession(ctx context.Context, spec SessionSpec) (bool, erro
 	return c.EnsureSession(ctx, spec)
 }
 
+func (c *Client) SessionExists(ctx context.Context, session string) (bool, error) {
+	return c.hasSession(ctx, session)
+}
+
 func (c *Client) waitForPrompt(ctx context.Context, spec SessionSpec, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {

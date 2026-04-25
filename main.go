@@ -66,6 +66,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	router.Start()
 
 	log.Printf(
 		"imcodex %s started: config=%s platform=%s runtime=%s groups=%d jobs=%d base=%s",

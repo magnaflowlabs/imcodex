@@ -210,20 +210,43 @@ func (f *fakeEditableMessenger) actionCount() int {
 }
 
 type fakeConsole struct {
-	mu                sync.Mutex
-	captures          []string
-	capturesByHistory map[int][]string
-	captureErrors     []error
-	captureHistory    []int
-	sendTexts         []string
-	ensureSpecs       []tmuxctl.SessionSpec
-	resetSpecs        []tmuxctl.SessionSpec
-	interrupts        []string
-	ensureErrors      []error
-	resetErrors       []error
-	sendErrors        []error
-	ensureEntered     chan struct{}
-	ensureBlock       <-chan struct{}
+	mu                  sync.Mutex
+	captures            []string
+	capturesByHistory   map[int][]string
+	captureErrors       []error
+	captureHistory      []int
+	sendTexts           []string
+	ensureSpecs         []tmuxctl.SessionSpec
+	resetSpecs          []tmuxctl.SessionSpec
+	interrupts          []string
+	ensureErrors        []error
+	resetErrors         []error
+	sendErrors          []error
+	sessionExists       bool
+	sessionExistsByName map[string]bool
+	sessionExistsErrors []error
+	sessionExistsCalls  []string
+	ensureEntered       chan struct{}
+	ensureBlock         <-chan struct{}
+}
+
+func (f *fakeConsole) SessionExists(_ context.Context, session string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessionExistsCalls = append(f.sessionExistsCalls, session)
+	if len(f.sessionExistsErrors) > 0 {
+		err := f.sessionExistsErrors[0]
+		if len(f.sessionExistsErrors) > 1 {
+			f.sessionExistsErrors = f.sessionExistsErrors[1:]
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	if f.sessionExistsByName != nil {
+		return f.sessionExistsByName[session], nil
+	}
+	return f.sessionExists, nil
 }
 
 func (f *fakeConsole) EnsureSession(_ context.Context, spec tmuxctl.SessionSpec) (bool, error) {
@@ -4381,6 +4404,52 @@ func TestServiceDoesNotReplayInitialBusyHistoryBurstAfterRestart(t *testing.T) {
 	}
 	if !strings.Contains(joined, "new reply final") {
 		t.Fatalf("messages = %#v, want current reply forwarded", messenger.all())
+	}
+}
+
+func TestServiceStartMonitoringExistingSessionSkipsBaselineAndForwardsNewTail(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseline := "• old reply one\n\n• old reply two"
+	console := &fakeConsole{
+		sessionExists: true,
+		captures: []string{
+			baseline,
+			baseline,
+			baseline + "\n\n• resumed tail\n\n• Working (1s • esc to interrupt)",
+			baseline + "\n\n• resumed tail",
+			baseline + "\n\n• resumed tail",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(ctx, Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	svc.pollEvery = 5 * time.Millisecond
+	svc.history = 2000
+	svc.startWait = 0
+	svc.flushIdleTicks = 1
+	svc.idleConfirmTicks = 1
+	svc.detachedSendEvery = 0
+
+	svc.startMonitoringExistingSession()
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+		return strings.Contains(joined, "resumed tail")
+	})
+
+	joined := strings.Join(nonStatusMessages(messenger.all()), "\n")
+	if strings.Contains(joined, "old reply one") || strings.Contains(joined, "old reply two") {
+		t.Fatalf("messages = %#v, want startup baseline excluded", messenger.all())
+	}
+	if !strings.Contains(joined, "resumed tail") {
+		t.Fatalf("messages = %#v, want new tail after startup forwarded", messenger.all())
+	}
+	if got := console.allCaptureHistory(); len(got) == 0 || got[0] != tmuxctl.CaptureRecoveryHistory {
+		t.Fatalf("capture history = %#v, want startup recovery capture first", got)
 	}
 }
 

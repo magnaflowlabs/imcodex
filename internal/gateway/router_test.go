@@ -174,6 +174,48 @@ func TestRouterKeepsGroupBuffersIsolated(t *testing.T) {
 	}
 }
 
+func TestRouterStartBeginsMonitoringExistingConfiguredGroups(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	console := &fakeConsole{
+		sessionExistsByName: map[string]bool{
+			"imcodex-a-oc-1": true,
+			"imcodex-b-oc-2": true,
+		},
+		captures: []string{"", ""},
+	}
+	router, err := NewRouter(ctx, []Options{
+		{GroupID: "oc_1", CWD: "/srv/a", SessionName: "imcodex-a-oc-1"},
+		{GroupID: "oc_2", CWD: "/srv/b", SessionName: "imcodex-b-oc-2"},
+	}, &fakeMessenger{}, console, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("NewRouter() error = %v", err)
+	}
+
+	for _, service := range router.services {
+		service.pollEvery = 5 * time.Millisecond
+		service.startWait = 0
+	}
+
+	router.Start()
+
+	waitFor(t, 500*time.Millisecond, func() bool {
+		return len(console.ensured()) >= 2
+	})
+
+	ensured := console.ensured()
+	seen := make(map[string]bool, len(ensured))
+	for _, spec := range ensured {
+		seen[spec.SessionName] = true
+	}
+	if !seen["imcodex-a-oc-1"] || !seen["imcodex-b-oc-2"] {
+		t.Fatalf("ensured sessions = %#v, want both configured sessions monitored", ensured)
+	}
+}
+
 func TestRouterRejectsDuplicateGroup(t *testing.T) {
 	t.Parallel()
 
