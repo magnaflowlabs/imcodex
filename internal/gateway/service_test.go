@@ -4453,6 +4453,51 @@ func TestServiceStartMonitoringExistingSessionSkipsBaselineAndForwardsNewTail(t 
 	}
 }
 
+func TestServicePollDropsPassiveRecoveryResetInsteadOfReplaying(t *testing.T) {
+	t.Parallel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"• baseline\n\n• rewritten recovery window\n\n• Working (1s • esc to interrupt)",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:                    svc.opts,
+		session:                 svc.opts.SessionName,
+		sessionReady:            true,
+		outputArmed:             true,
+		passiveRecoveredSession: true,
+		baseText:                "• baseline",
+		lastText:                "• baseline\n\n• previous recovery window",
+		lastBusy:                true,
+		outputText:              "• previous recovery window",
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• previous recovery window"},
+		},
+	}
+
+	svc.poll(rt)
+
+	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
+		t.Fatalf("outputBuffer = %q, want passive reset dropped", got)
+	}
+	if got := strings.TrimSpace(rt.outputText); got != "" {
+		t.Fatalf("outputText = %q, want passive reset to clear published baseline", got)
+	}
+	if len(rt.outputMessages) != 0 {
+		t.Fatalf("len(outputMessages) = %d, want passive reset to detach old editable state", len(rt.outputMessages))
+	}
+	if got := nonStatusMessages(messenger.all()); len(got) != 0 {
+		t.Fatalf("messages = %#v, want no replayed passive reset", got)
+	}
+	if got, want := rt.lastText, tmuxctl.NormalizeSnapshot("• baseline\n\n• rewritten recovery window"); got != want {
+		t.Fatalf("lastText = %q, want reset snapshot adopted as baseline", got)
+	}
+}
+
 func TestServiceDispatchResetsSessionWhenPreviousPromptPersists(t *testing.T) {
 	t.Parallel()
 
