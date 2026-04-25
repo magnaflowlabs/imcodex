@@ -3447,6 +3447,58 @@ func TestServiceDropsOversizedEditableOutputWithoutSending(t *testing.T) {
 	}
 }
 
+func TestServicePollQuiescesDroppedRunAfterIdle(t *testing.T) {
+	t.Parallel()
+
+	console := &fakeConsole{
+		captures: []string{
+			"• synced\n\n  gpt-5.4 xhigh · /srv/demo",
+			"• synced\n\n• late oversized tail\n\n  gpt-5.4 xhigh · /srv/demo",
+		},
+	}
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeEditableMessenger{}, console, nil, slog.Default())
+	svc.idleConfirmTicks = 1
+	rt := &groupRuntime{
+		opts:               svc.opts,
+		session:            svc.opts.SessionName,
+		sessionReady:       true,
+		outputArmed:        true,
+		lastBusy:           true,
+		runID:              12,
+		nextRunID:          12,
+		outputDroppedRunID: 12,
+		outputText:         "• synced",
+		outputMessages: []trackedMessage{
+			{messageID: "1", text: "• synced"},
+		},
+		active: &activeRequest{
+			messageID: "om_1",
+			input:     "large reply",
+		},
+	}
+
+	svc.poll(rt)
+
+	if rt.outputArmed {
+		t.Fatal("outputArmed = true, want dropped idle run quiesced")
+	}
+	if rt.active != nil {
+		t.Fatalf("active = %#v, want nil after idle", rt.active)
+	}
+	if got, want := rt.outputDroppedRunID, uint64(12); got != want {
+		t.Fatalf("outputDroppedRunID = %d, want %d preserved until next run", got, want)
+	}
+	if got := strings.TrimSpace(rt.outputText); got != "• synced" {
+		t.Fatalf("outputText = %q, want previously synced body preserved", got)
+	}
+
+	svc.poll(rt)
+
+	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
+		t.Fatalf("outputBuffer = %q, want late dropped-run tail ignored", got)
+	}
+}
+
 func TestServiceDropsDetachedQueueWhenAppendingWouldExceedLimit(t *testing.T) {
 	t.Parallel()
 
@@ -4675,6 +4727,21 @@ func TestSnapshotContainsPromptEchoDoesNotFalseMatchShortHistoricPrompt(t *testi
 	snapshot := "› 在吗？\n\n• 在。\n\n› 在？\n\n• 在。\n\n› Find and fix a bug in @filename\n\n  gpt-5.4 xhigh · ~/flow"
 	if snapshotContainsPromptEcho(snapshot, "在") {
 		t.Fatalf("snapshotContainsPromptEcho() = true, want false for short prompt that only appears inside older longer prompts")
+	}
+}
+
+func TestLatestPromptBodyIgnoresCodexStarterSuggestions(t *testing.T) {
+	t.Parallel()
+
+	snapshot := "╭─────────────────────────────────────────────╮\n│ >_ OpenAI Codex                             │\n╰─────────────────────────────────────────────╯\n\n› Implement {feature}\n\n› Use /skills to list available skills\n\n  gpt-5.5 xhigh · ~/flow"
+	if got, ok := latestPromptBody(snapshot); ok {
+		t.Fatalf("latestPromptBody() = %q, true; want no foreign prompt from starter suggestions", got)
+	}
+
+	snapshot = "› stale real prompt\n\n• stale reply\n\n› Implement {feature}\n\n› Use /skills to list available skills\n\n  gpt-5.5 xhigh · ~/flow"
+	got, ok := latestPromptBody(snapshot)
+	if !ok || got != "stale real prompt" {
+		t.Fatalf("latestPromptBody() = %q, %v; want stale real prompt", got, ok)
 	}
 }
 

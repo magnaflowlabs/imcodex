@@ -1148,6 +1148,7 @@ func (s *Service) poll(rt *groupRuntime) {
 		rt.interruptSentAt = time.Time{}
 		rt.forceInterruptSent = false
 		rt.active = nil
+		rt.quiesceDroppedRunOutput()
 	}
 	if busyChanged {
 		s.logger.Info(
@@ -1542,13 +1543,31 @@ func latestPromptBody(snapshot string) (string, bool) {
 			continue
 		}
 		if strings.HasPrefix(line, "›") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "›")), true
+			body := strings.TrimSpace(strings.TrimPrefix(line, "›"))
+			if isCodexStarterSuggestionPrompt(body) {
+				continue
+			}
+			return body, true
 		}
 		if strings.HasPrefix(line, ">") {
-			return strings.TrimSpace(strings.TrimPrefix(line, ">")), true
+			body := strings.TrimSpace(strings.TrimPrefix(line, ">"))
+			if isCodexStarterSuggestionPrompt(body) {
+				continue
+			}
+			return body, true
 		}
 	}
 	return "", false
+}
+
+func isCodexStarterSuggestionPrompt(body string) bool {
+	switch strings.ToLower(normalizePromptBody(body)) {
+	case "implement {feature}",
+		"use /skills to list available skills":
+		return true
+	default:
+		return false
+	}
 }
 
 func promptFirstLine(input string) string {
@@ -2812,6 +2831,26 @@ func (rt *groupRuntime) isDroppingCurrentRunOutput() bool {
 		return false
 	}
 	return rt.outputDroppedRunID == rt.currentRunID()
+}
+
+func (rt *groupRuntime) quiesceDroppedRunOutput() {
+	if rt == nil || !rt.isDroppingCurrentRunOutput() {
+		return
+	}
+	rt.outputArmed = false
+	rt.promptEchoTail = ""
+	rt.promptEchoPending = false
+	rt.passiveRecoveredSession = false
+	rt.clearOutputBuffer()
+	rt.detachedOutputs = nil
+	rt.detachedBaselineByRun = nil
+	rt.deferBodyUntilIdle = false
+	rt.editBackoffUntil = time.Time{}
+	rt.editRateLimitCount = 0
+	rt.detachedBackoffUntil = time.Time{}
+	rt.detachedRetryCount = 0
+	rt.nextDetachedSendAt = time.Time{}
+	rt.lastDetachedWatchdogAt = time.Time{}
 }
 
 func (rt *groupRuntime) notePreBusyMutedText(text string) {

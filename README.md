@@ -193,7 +193,7 @@ If you want to prebuild the same image manually:
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.120.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.23 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.24 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -235,7 +235,7 @@ and `tmux` session reuse continue to work the same way.
 
 ## Message Delivery
 
-`v2.2.23` keeps host runtime as the default and further hardens Telegram delivery
+`v2.2.24` keeps host runtime as the default and further hardens Telegram delivery
 behavior without changing the public config
 surface:
 
@@ -249,6 +249,10 @@ surface:
 - editable or detached `429`, delivery timeout, and oversized run output now
   drop the current run body instead of retrying, writing spill files, or later
   replaying a backlog
+- dropped current-run output now quiesces once Codex is idle, avoiding repeated
+  dropped-output polling logs
+- Codex starter suggestions are ignored during stale prompt detection, avoiding
+  false session resets on fresh panes
 - detached delivery tracks per-run observed baselines so pane reset/rewrite
   jitter cannot enqueue the same already-observed body again before a safety
   drop is triggered
@@ -281,5 +285,5 @@ More detailed runtime notes:
 ## Example Startup Log
 
 ```text
-imcodex 2.2.23 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
+imcodex 2.2.24 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
 ```
