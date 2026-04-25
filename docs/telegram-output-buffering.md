@@ -2,7 +2,7 @@
 
 ## Status
 
-Current behavior for `v2.2.14`. This document describes what ships today, not a
+Current behavior for `v2.2.15`. This document describes what ships today, not a
 future proposal.
 
 ## Goals
@@ -39,6 +39,8 @@ future proposal.
 
 - Plain detached chunks are queued in order.
 - After backoff expires, the queue resumes in order.
+- Per-run detached baselines record what has already been accepted into the
+  queue, so later pane reset/rewrite snapshots only enqueue the unsent tail.
 - Consecutive queued chunks from the same run may be sent as one larger plain
   message when they still fit within Telegram's safe message size, but batching
   now preserves the exact queued bytes in order.

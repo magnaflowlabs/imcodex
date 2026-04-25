@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -101,7 +100,7 @@ func (c *Client) DownloadMessageResource(ctx context.Context, messageID string, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		data, err := io.ReadAll(resp.Body)
+		data, err := gateway.ReadDownloadedResourceBody(resp.Body)
 		if err != nil {
 			return gateway.DownloadedResource{}, fmt.Errorf("read resource body: %w", err)
 		}

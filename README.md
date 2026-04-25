@@ -187,7 +187,7 @@ If you want to prebuild the same image manually:
 ```bash
 docker build \
   --build-arg CODEX_VERSION=0.120.0 \
-  --build-arg IMCODEX_IMAGE_REVISION=2.2.14 \
+  --build-arg IMCODEX_IMAGE_REVISION=2.2.15 \
   -t imcodex-codex:stable \
   -f tools/runtime/Dockerfile.codex .
 ```
@@ -224,7 +224,7 @@ and `tmux` session reuse continue to work the same way.
 
 ## Message Delivery
 
-`v2.2.14` keeps host runtime as the default and further hardens Telegram delivery
+`v2.2.15` keeps host runtime as the default and further hardens Telegram delivery
 behavior without changing the public config
 surface:
 
@@ -237,11 +237,15 @@ surface:
   pasted into a tmux session
 - severe editable `429` responses fall back to detached delivery instead of
   retrying the same editable body indefinitely
+- detached delivery now tracks per-run observed baselines so pane reset/rewrite
+  jitter cannot enqueue the same already-observed body again
 - editable reply sync no longer bypasses the normal edit throttle on every
   busy-to-idle transition
 - watchdog retries no longer rewrite an editable body into plain detached body
   sends
 - recovery after `429` no longer depends on a later unrelated inbound message
+- Telegram/Lark attachments are downloaded with a bounded body-size limit before
+  being written to `.imcodex/inbox`
 - delivery tracing now logs why buffered output is waiting, blocked, or
   committed
 
@@ -263,5 +267,5 @@ More detailed runtime notes:
 ## Example Startup Log
 
 ```text
-imcodex 2.2.14 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
+imcodex 2.2.15 started: config=/srv/imcodex/imcodex.yaml platform=telegram runtime=host-codex groups=1 jobs=1 base=https://api.telegram.org
 ```

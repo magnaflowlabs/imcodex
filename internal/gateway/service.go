@@ -467,6 +467,8 @@ func (s *Service) ensureSession(rt *groupRuntime) error {
 		rt.outputText = ""
 		rt.outputMessages = nil
 		rt.statusMessage = trackedMessage{}
+		rt.detachedOutputs = nil
+		rt.detachedBaselineByRun = nil
 		rt.promptEchoTail = ""
 		rt.promptEchoPending = false
 		rt.runBusySeen = false
@@ -549,6 +551,7 @@ func (s *Service) dispatchNext(rt *groupRuntime) {
 			rt.outputMessages = nil
 			rt.statusMessage = trackedMessage{}
 			rt.detachedOutputs = nil
+			rt.detachedBaselineByRun = nil
 			rt.outputBackoffUntil = time.Time{}
 			rt.detachedBackoffUntil = time.Time{}
 			rt.detachedRetryCount = 0
@@ -657,6 +660,7 @@ func (s *Service) dispatchPreparedAttempt(rt *groupRuntime, req *activeRequest, 
 			rt.outputMessages = nil
 			rt.statusMessage = trackedMessage{}
 			rt.detachedOutputs = nil
+			rt.detachedBaselineByRun = nil
 			rt.outputBackoffUntil = time.Time{}
 			rt.detachedBackoffUntil = time.Time{}
 			rt.detachedRetryCount = 0
@@ -702,7 +706,7 @@ func (s *Service) dispatchPreparedAttempt(rt *groupRuntime, req *activeRequest, 
 	rt.nextRunID++
 	rt.runID = rt.nextRunID
 	rt.commitCursor(rt.runID, 0)
-	rt.pruneCommittedCursors(64)
+	rt.pruneRunState(64)
 	s.logger.Info(
 		"codex run started",
 		"group_id", rt.opts.GroupID,
@@ -1718,6 +1722,32 @@ func (rt *groupRuntime) pruneCommittedCursors(keep int) {
 	}
 }
 
+func (rt *groupRuntime) pruneRunState(keep int) {
+	if rt == nil {
+		return
+	}
+	rt.pruneCommittedCursors(keep)
+	rt.pruneDetachedBaselines(keep)
+}
+
+func (rt *groupRuntime) pruneDetachedBaselines(keep int) {
+	if rt == nil || keep <= 0 || rt.detachedBaselineByRun == nil {
+		return
+	}
+	if len(rt.detachedBaselineByRun) <= keep {
+		return
+	}
+	minRunID := uint64(1)
+	if rt.nextRunID > uint64(keep) {
+		minRunID = rt.nextRunID - uint64(keep) + 1
+	}
+	for runID := range rt.detachedBaselineByRun {
+		if runID < minRunID {
+			delete(rt.detachedBaselineByRun, runID)
+		}
+	}
+}
+
 func (s *Service) keepLatestPending(rt *groupRuntime) {
 	var latest IncomingMessage
 	if len(rt.pending) > 0 {
@@ -2091,12 +2121,9 @@ func (s *Service) detachBufferedOutput(rt *groupRuntime) {
 	if runID == 0 {
 		runID = rt.nextRunID
 	}
-	candidate := mergeBufferedOutput(rt.outputText, rt.outputBuffer)
-	unsent := candidate
-	if strings.HasPrefix(candidate, rt.outputText) {
-		unsent = candidate[len(rt.outputText):]
-	}
-	unsent = strings.Trim(unsent, "\n")
+	baseline := mergeBufferedOutput(rt.outputText, rt.detachedBaseline(runID))
+	candidate := mergeBufferedOutput(baseline, rt.outputBuffer)
+	unsent := unsentOutputDelta(baseline, candidate)
 	if strings.TrimSpace(unsent) != "" {
 		rt.enqueueDetachedOutput(runID, unsent)
 	}
@@ -2796,9 +2823,6 @@ func (rt *groupRuntime) enqueueDetachedOutput(runID uint64, text string) {
 		if chunk == "" {
 			continue
 		}
-		if rt.hasDetachedOutputChunk(runID, chunk) {
-			continue
-		}
 		cursor++
 		rt.detachedOutputs = append(rt.detachedOutputs, detachedOutput{
 			runID:      runID,
@@ -2807,18 +2831,6 @@ func (rt *groupRuntime) enqueueDetachedOutput(runID uint64, text string) {
 			enqueuedAt: time.Now(),
 		})
 	}
-}
-
-func (rt *groupRuntime) hasDetachedOutputChunk(runID uint64, chunk string) bool {
-	if rt == nil || chunk == "" {
-		return false
-	}
-	for _, item := range rt.detachedOutputs {
-		if item.runID == runID && item.text == chunk {
-			return true
-		}
-	}
-	return false
 }
 
 type detachedSendBatch struct {
