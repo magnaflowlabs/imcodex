@@ -2463,6 +2463,12 @@ func mergeBufferedOutput(existing string, delta string) string {
 	if existing == "" {
 		return delta
 	}
+	if tail, ok := observedWindowTailDelta(existing, delta); ok {
+		if tail == "" {
+			return existing
+		}
+		return mergeBufferedOutput(existing, tail)
+	}
 	if strings.HasPrefix(delta, existing) {
 		return delta
 	}
@@ -2494,6 +2500,33 @@ func unsentOutputDelta(baseline string, candidate string) string {
 		return strings.Trim(candidate[overlap:], "\n")
 	}
 	return candidate
+}
+
+func observedWindowTailDelta(known string, snapshot string) (string, bool) {
+	known = strings.Trim(known, "\n")
+	snapshot = strings.Trim(snapshot, "\n")
+	if strings.TrimSpace(known) == "" || strings.TrimSpace(snapshot) == "" {
+		return "", false
+	}
+	if utf8.RuneCountInString(snapshot) < maxMessageRunes {
+		return "", false
+	}
+	if strings.Contains(known, snapshot) {
+		return "", true
+	}
+
+	lines := strings.Split(snapshot, "\n")
+	for n := len(lines) - 1; n > 0; n-- {
+		prefix := strings.Join(lines[:n], "\n")
+		if utf8.RuneCountInString(prefix) < maxMessageRunes {
+			break
+		}
+		if strings.Contains(known, prefix) {
+			tail := strings.TrimRight(snapshot[len(prefix):], "\n")
+			return tail, true
+		}
+	}
+	return "", false
 }
 
 func usableMergeOverlap(existing string, delta string, overlap int) bool {

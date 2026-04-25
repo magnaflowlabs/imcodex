@@ -1787,6 +1787,34 @@ func TestMergeBufferedOutputKeepsTinyOverlapAsAppend(t *testing.T) {
 	}
 }
 
+func TestMergeBufferedOutputSkipsLargeObservedWindow(t *testing.T) {
+	t.Parallel()
+
+	window := strings.Repeat("observed line\n", maxMessageRunes/len("observed line\n")+10)
+	existing := "prefix\n" + window + "\nsuffix"
+
+	got := mergeBufferedOutput(existing, window)
+
+	if got != existing {
+		t.Fatalf("mergeBufferedOutput() length = %d, want unchanged length %d", len(got), len(existing))
+	}
+}
+
+func TestMergeBufferedOutputKeepsOnlyTailAfterLargeObservedWindowPrefix(t *testing.T) {
+	t.Parallel()
+
+	window := strings.Repeat("observed line\n", maxMessageRunes/len("observed line\n")+10)
+	existing := "prefix\n" + window + "\nsuffix"
+	snapshot := window + "\nnew tail"
+
+	got := mergeBufferedOutput(existing, snapshot)
+	want := existing + "\nnew tail"
+
+	if got != want {
+		t.Fatalf("mergeBufferedOutput() length = %d, want %d", len(got), len(want))
+	}
+}
+
 func TestServiceEditableMessengerBacksOffAfterRateLimit(t *testing.T) {
 	t.Parallel()
 
@@ -3096,6 +3124,37 @@ func TestServiceFlushOutputBufferQueuesOnlyTailPastDetachedBaseline(t *testing.T
 	}
 	if got := rt.outputText; got != baseline+"\n• new tail" {
 		t.Fatalf("outputText = %q, want advanced baseline with tail", got)
+	}
+}
+
+func TestServiceFlushOutputBufferQueuesOnlyTailAfterObservedWindowSnapshot(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, &fakeMessenger{}, &fakeConsole{}, nil, slog.Default())
+	window := strings.Repeat("observed line\n", maxMessageRunes/len("observed line\n")+10)
+	baseline := "prefix\n" + window + "\nsuffix"
+	rt := &groupRuntime{
+		opts:         svc.opts,
+		runID:        2,
+		nextRunID:    2,
+		outputText:   baseline,
+		outputBuffer: window + "\nnew tail",
+		detachedOutputs: []detachedOutput{
+			{runID: 2, cursor: 1, text: "queued"},
+		},
+	}
+	rt.noteDetachedBaseline(2, baseline)
+
+	svc.flushOutputBuffer(rt)
+
+	if got := len(rt.detachedOutputs); got != 2 {
+		t.Fatalf("len(detachedOutputs) = %d, want only one new tail queued", got)
+	}
+	if got, want := rt.detachedOutputs[1].text, "new tail"; got != want {
+		t.Fatalf("queued text length = %d text=%q, want %q", len(got), got, want)
+	}
+	if got := rt.outputText; got != baseline+"\nnew tail" {
+		t.Fatalf("outputText length = %d, want advanced baseline length %d", len(got), len(baseline)+len("\nnew tail"))
 	}
 }
 
