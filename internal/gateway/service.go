@@ -998,10 +998,19 @@ func (s *Service) poll(rt *groupRuntime) {
 			delta = tail
 			reset = false
 		} else {
-			s.dropPassiveRecoveryReset(rt, currText)
+			s.dropPassiveRecoveryOutput(rt, currText)
 			delta = ""
 			reset = false
 		}
+	}
+	if rt.outputArmed &&
+		rt.passiveRecoveredSession &&
+		rt.active == nil &&
+		!reset &&
+		strings.TrimSpace(delta) != "" &&
+		outputDeliveryTooLarge(delta) {
+		s.dropPassiveRecoveryOutput(rt, currText)
+		delta = ""
 	}
 	if rt.outputArmed && rt.active != nil && !rt.runBusySeen {
 		if busyRaw {
@@ -1690,13 +1699,13 @@ func (s *Service) resetBufferedOutput(rt *groupRuntime, currText string) bool {
 	return true
 }
 
-func (s *Service) dropPassiveRecoveryReset(rt *groupRuntime, currText string) {
+func (s *Service) dropPassiveRecoveryOutput(rt *groupRuntime, currText string) {
 	if rt == nil {
 		return
 	}
 	if !rt.passiveResetDropLogged {
 		s.logger.Warn(
-			"dropping passive recovery reset output",
+			"dropping passive recovery output",
 			"group_id", rt.opts.GroupID,
 			"run_id", rt.runID,
 			"curr_len", utf8.RuneCountInString(strings.Trim(currText, "\n")),

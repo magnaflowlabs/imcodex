@@ -4498,6 +4498,43 @@ func TestServicePollDropsPassiveRecoveryResetInsteadOfReplaying(t *testing.T) {
 	}
 }
 
+func TestServicePollDropsOversizedPassiveRecoveryWindowWithoutRunDrop(t *testing.T) {
+	t.Parallel()
+
+	huge := "• " + strings.Repeat("large-window ", maxOutputDeliveryRunes)
+	console := &fakeConsole{
+		captures: []string{
+			huge + "\n\n• Working (1s • esc to interrupt)",
+		},
+	}
+	messenger := &fakeMessenger{}
+
+	svc := NewService(context.Background(), Options{GroupID: "oc_1", CWD: "/srv/demo", SessionName: "imcodex-demo"}, messenger, console, nil, slog.Default())
+	rt := &groupRuntime{
+		opts:                    svc.opts,
+		session:                 svc.opts.SessionName,
+		sessionReady:            true,
+		outputArmed:             true,
+		passiveRecoveredSession: true,
+		lastBusy:                true,
+	}
+
+	svc.poll(rt)
+
+	if got := strings.TrimSpace(rt.outputBuffer); got != "" {
+		t.Fatalf("outputBuffer = %q, want oversized passive recovery window dropped", got)
+	}
+	if rt.outputDroppedRunID != 0 {
+		t.Fatalf("outputDroppedRunID = %d, want passive drop not current-run drop", rt.outputDroppedRunID)
+	}
+	if got := nonStatusMessages(messenger.all()); len(got) != 0 {
+		t.Fatalf("messages = %#v, want no oversized passive recovery send", got)
+	}
+	if got, want := rt.lastText, tmuxctl.NormalizeSnapshot(huge); got != want {
+		t.Fatalf("lastText length = %d, want oversized snapshot adopted as baseline length %d", len(got), len(want))
+	}
+}
+
 func TestServiceDispatchResetsSessionWhenPreviousPromptPersists(t *testing.T) {
 	t.Parallel()
 
